@@ -68,7 +68,7 @@ class PersonaViewModel @Inject constructor(
         viewModelScope.launch {
             val settings = settingsRepository.getSettings()
             _uiState.update {
-                it.copy(forgeAvailable = settings.forgeUrl.isNotBlank())
+                it.copy(forgeAvailable = settings.imageGenBackendConfigured)
             }
         }
         loadPersonas()
