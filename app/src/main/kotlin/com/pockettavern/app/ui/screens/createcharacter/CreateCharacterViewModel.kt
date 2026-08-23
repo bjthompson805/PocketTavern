@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import com.pockettavern.app.data.local.SettingsDataStore
 import com.pockettavern.app.data.repository.ForgeRepository
 import com.pockettavern.app.data.repository.ImageGenRepository
 import com.pockettavern.app.data.repository.LocalRepository
@@ -12,6 +13,7 @@ import com.pockettavern.app.data.repository.SettingsRepository
 import com.pockettavern.app.domain.model.Character
 import com.pockettavern.app.domain.model.ForgeGenerationParams
 import com.pockettavern.app.domain.model.GenerationState
+import com.pockettavern.app.domain.model.ImageGenCapabilities
 import com.pockettavern.app.domain.model.Result
 import com.pockettavern.app.util.PngCharacterCard
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -33,6 +35,7 @@ data class CreateCharacterUiState(
     val avatarBase64: String? = null,
     val generationState: GenerationState = GenerationState.Idle,
     val forgeAvailable: Boolean = false,
+    val imageGenCapabilities: ImageGenCapabilities = ImageGenCapabilities(),
     val isCreating: Boolean = false,
     val createSuccess: Boolean = false,
     val error: String? = null,
@@ -64,7 +67,8 @@ class CreateCharacterViewModel @Inject constructor(
     private val localRepository: LocalRepository,
     private val forgeRepository: ForgeRepository,
     private val imageGenRepository: ImageGenRepository,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    private val settingsDataStore: SettingsDataStore
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(CreateCharacterUiState())
@@ -77,7 +81,10 @@ class CreateCharacterViewModel @Inject constructor(
     private fun checkForgeAvailability() {
         viewModelScope.launch {
             val settings = settingsRepository.getSettings()
-            _uiState.update { it.copy(forgeAvailable = settings.imageGenBackendConfigured) }
+            val capabilities = imageGenRepository.getCapabilities()
+            _uiState.update {
+                it.copy(forgeAvailable = settings.imageGenBackendConfigured, imageGenCapabilities = capabilities)
+            }
         }
     }
 
@@ -212,11 +219,16 @@ class CreateCharacterViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            val config = settingsDataStore.getImageGenConfig()
             val params = ForgeGenerationParams(
                 prompt = prompt,
-                width = 512,
-                height = 768,
-                steps = 20
+                negativePrompt = config.negativePrompt,
+                width = config.width,
+                height = config.height,
+                steps = config.steps,
+                cfgScale = config.cfgScale,
+                sampler = config.sampler,
+                seed = config.seed
             )
 
             imageGenRepository.generateImageWithProgress(params).collect { state ->

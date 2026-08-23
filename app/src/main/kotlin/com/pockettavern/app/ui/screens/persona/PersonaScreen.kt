@@ -182,6 +182,16 @@ fun PersonaScreen(
                 position = uiState.editPosition,
                 role = uiState.editRole,
                 depth = uiState.editDepth,
+                avatarImageBytes = uiState.avatarImageBytes,
+                forgeAvailable = uiState.forgeAvailable,
+                generationPrompt = uiState.generationPrompt,
+                isGenerating = uiState.isGenerating,
+                generationProgress = uiState.generationProgress,
+                canCancelGeneration = uiState.imageGenCapabilities.supportsCancel,
+                onImageSelected = { bytes, mimeType -> viewModel.setAvatarImage(bytes, mimeType) },
+                onGenerationPromptChange = { viewModel.updateGenerationPrompt(it) },
+                onGenerate = { viewModel.generateImage() },
+                onCancelGeneration = { viewModel.cancelGeneration() },
                 onDescriptionChange = { viewModel.updateEditDescription(it) },
                 onPositionChange = { viewModel.updateEditPosition(it) },
                 onRoleChange = { viewModel.updateEditRole(it) },
@@ -220,15 +230,16 @@ fun PersonaScreen(
         // Create persona dialog
         if (uiState.showCreateDialog) {
             CreatePersonaDialog(
-                imageBytes = uiState.createImageBytes,
+                imageBytes = uiState.avatarImageBytes,
                 name = uiState.createName,
                 description = uiState.createDescription,
                 forgeAvailable = uiState.forgeAvailable,
                 generationPrompt = uiState.generationPrompt,
                 isGenerating = uiState.isGenerating,
                 generationProgress = uiState.generationProgress,
+                canCancelGeneration = uiState.imageGenCapabilities.supportsCancel,
                 onImageSelected = { bytes, mimeType ->
-                    viewModel.setCreateImage(bytes, mimeType)
+                    viewModel.setAvatarImage(bytes, mimeType)
                 },
                 onNameChange = { viewModel.updateCreateName(it) },
                 onDescriptionChange = { viewModel.updateCreateDescription(it) },
@@ -440,6 +451,16 @@ private fun EditPersonaDialog(
     position: PersonaPosition,
     role: PersonaRole,
     depth: Int,
+    avatarImageBytes: ByteArray?,
+    forgeAvailable: Boolean,
+    generationPrompt: String,
+    isGenerating: Boolean,
+    generationProgress: Float,
+    canCancelGeneration: Boolean,
+    onImageSelected: (ByteArray, String) -> Unit,
+    onGenerationPromptChange: (String) -> Unit,
+    onGenerate: () -> Unit,
+    onCancelGeneration: () -> Unit,
     onDescriptionChange: (String) -> Unit,
     onPositionChange: (PersonaPosition) -> Unit,
     onRoleChange: (PersonaRole) -> Unit,
@@ -450,13 +471,27 @@ private fun EditPersonaDialog(
     isSaving: Boolean
 ) {
     AlertDialog(
-        onDismissRequest = { if (!isSaving) onDismiss() },
+        onDismissRequest = { if (!isSaving && !isGenerating) onDismiss() },
         title = { Text(stringResource(R.string.edit_named, persona.name)) },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                AvatarPickerSection(
+                    imageBytes = avatarImageBytes,
+                    forgeAvailable = forgeAvailable,
+                    generationPrompt = generationPrompt,
+                    isGenerating = isGenerating,
+                    generationProgress = generationProgress,
+                    canCancelGeneration = canCancelGeneration,
+                    onImageSelected = onImageSelected,
+                    onGenerationPromptChange = onGenerationPromptChange,
+                    onGenerate = onGenerate,
+                    onCancelGeneration = onCancelGeneration,
+                )
+
                 OutlinedTextField(
                     value = description,
                     onValueChange = onDescriptionChange,
@@ -569,7 +604,7 @@ private fun EditPersonaDialog(
             Row {
                 TextButton(
                     onClick = onDelete,
-                    enabled = !isSaving,
+                    enabled = !isSaving && !isGenerating,
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error
                     )
@@ -579,7 +614,7 @@ private fun EditPersonaDialog(
                 Spacer(Modifier.width(8.dp))
                 Button(
                     onClick = onSave,
-                    enabled = !isSaving
+                    enabled = !isSaving && !isGenerating
                 ) {
                     if (isSaving) {
                         CircularProgressIndicator(
@@ -595,7 +630,7 @@ private fun EditPersonaDialog(
         dismissButton = {
             TextButton(
                 onClick = onDismiss,
-                enabled = !isSaving
+                enabled = !isSaving && !isGenerating
             ) {
                 Text(stringResource(R.string.cancel))
             }
@@ -603,25 +638,23 @@ private fun EditPersonaDialog(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Avatar picker + AI-generate UI shared by [CreatePersonaDialog] and [EditPersonaDialog] --
+ * there's only one persona avatar in this single-persona app (see [PersonaViewModel]'s class
+ * doc), so both dialogs edit the same image via the same flow.
+ */
 @Composable
-private fun CreatePersonaDialog(
+private fun AvatarPickerSection(
     imageBytes: ByteArray?,
-    name: String,
-    description: String,
     forgeAvailable: Boolean,
     generationPrompt: String,
     isGenerating: Boolean,
     generationProgress: Float,
+    canCancelGeneration: Boolean,
     onImageSelected: (ByteArray, String) -> Unit,
-    onNameChange: (String) -> Unit,
-    onDescriptionChange: (String) -> Unit,
     onGenerationPromptChange: (String) -> Unit,
     onGenerate: () -> Unit,
     onCancelGeneration: () -> Unit,
-    onCreate: () -> Unit,
-    onDismiss: () -> Unit,
-    isSaving: Boolean
 ) {
     val context = LocalContext.current
     val avatarShape = LocalPocketTavernColors.current.avatarShape.toShape()
@@ -646,6 +679,176 @@ private fun CreatePersonaDialog(
         }
     }
 
+    // Tab selector if Forge is available
+    if (forgeAvailable) {
+        TabRow(selectedTabIndex = selectedTab) {
+            Tab(
+                selected = selectedTab == 0,
+                onClick = { selectedTab = 0 },
+                text = { Text(stringResource(R.string.select)) }
+            )
+            Tab(
+                selected = selectedTab == 1,
+                onClick = { selectedTab = 1 },
+                text = { Text(stringResource(R.string.generate)) }
+            )
+        }
+    }
+
+    // Image preview
+    Box(
+        modifier = Modifier
+            .size(120.dp)
+            .clip(avatarShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .then(
+                if (selectedTab == 0 && !isGenerating) {
+                    Modifier.clickable { imagePicker.launch("image/*") }
+                } else {
+                    Modifier
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            isGenerating -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(
+                        progress = { generationProgress },
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${(generationProgress * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            imageBytes != null -> {
+                val bitmap = remember(imageBytes) {
+                    BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                }
+                bitmap?.let {
+                    Image(
+                        bitmap = it.asImageBitmap(),
+                        contentDescription = stringResource(R.string.avatar),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(avatarShape),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+            }
+            selectedTab == 0 -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Default.AddAPhoto,
+                        contentDescription = stringResource(R.string.select_image),
+                        modifier = Modifier.size(32.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(stringResource(R.string.tap_to_select),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            else -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = stringResource(R.string.generate),
+                        modifier = Modifier.size(32.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(stringResource(R.string.enter_prompt_below),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+
+    // Generation prompt (only on Generate tab)
+    if (selectedTab == 1 && forgeAvailable) {
+        OutlinedTextField(
+            value = generationPrompt,
+            onValueChange = onGenerationPromptChange,
+            label = { Text(stringResource(R.string.generation_prompt)) },
+            placeholder = { Text(stringResource(R.string.portrait_of_a_person_detailed_high_quality)) },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+            maxLines = 3,
+            enabled = !isGenerating
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (isGenerating) {
+                OutlinedButton(
+                    onClick = onCancelGeneration,
+                    modifier = Modifier.weight(1f),
+                    enabled = canCancelGeneration
+                ) {
+                    Text(stringResource(R.string.cancel))
+                }
+            } else {
+                Button(
+                    onClick = onGenerate,
+                    modifier = Modifier.weight(1f),
+                    enabled = generationPrompt.isNotBlank()
+                ) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.generate))
+                }
+            }
+        }
+        if (isGenerating && !canCancelGeneration) {
+            Text(
+                text = "This backend can't cancel a generation once started -- it'll run to completion.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreatePersonaDialog(
+    imageBytes: ByteArray?,
+    name: String,
+    description: String,
+    forgeAvailable: Boolean,
+    generationPrompt: String,
+    isGenerating: Boolean,
+    generationProgress: Float,
+    canCancelGeneration: Boolean,
+    onImageSelected: (ByteArray, String) -> Unit,
+    onNameChange: (String) -> Unit,
+    onDescriptionChange: (String) -> Unit,
+    onGenerationPromptChange: (String) -> Unit,
+    onGenerate: () -> Unit,
+    onCancelGeneration: () -> Unit,
+    onCreate: () -> Unit,
+    onDismiss: () -> Unit,
+    isSaving: Boolean
+) {
     AlertDialog(
         onDismissRequest = { if (!isSaving && !isGenerating) onDismiss() },
         title = { Text(stringResource(R.string.create_persona)) },
@@ -655,145 +858,18 @@ private fun CreatePersonaDialog(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Tab selector if Forge is available
-                if (forgeAvailable) {
-                    TabRow(selectedTabIndex = selectedTab) {
-                        Tab(
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 },
-                            text = { Text(stringResource(R.string.select)) }
-                        )
-                        Tab(
-                            selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 },
-                            text = { Text(stringResource(R.string.generate)) }
-                        )
-                    }
-                }
-
-                // Image preview
-                Box(
-                    modifier = Modifier
-                        .size(120.dp)
-                        .clip(avatarShape)
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .then(
-                            if (selectedTab == 0 && !isGenerating) {
-                                Modifier.clickable { imagePicker.launch("image/*") }
-                            } else {
-                                Modifier
-                            }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    when {
-                        isGenerating -> {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                CircularProgressIndicator(
-                                    progress = { generationProgress },
-                                    modifier = Modifier.size(48.dp)
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    "${(generationProgress * 100).toInt()}%",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        imageBytes != null -> {
-                            val bitmap = remember(imageBytes) {
-                                BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-                            }
-                            bitmap?.let {
-                                Image(
-                                    bitmap = it.asImageBitmap(),
-                                    contentDescription = stringResource(R.string.avatar),
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clip(avatarShape),
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-                        }
-                        selectedTab == 0 -> {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Icon(
-                                    Icons.Default.AddAPhoto,
-                                    contentDescription = stringResource(R.string.select_image),
-                                    modifier = Modifier.size(32.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(stringResource(R.string.tap_to_select),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        else -> {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = stringResource(R.string.generate),
-                                    modifier = Modifier.size(32.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(stringResource(R.string.enter_prompt_below),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Generation prompt (only on Generate tab)
-                if (selectedTab == 1 && forgeAvailable) {
-                    OutlinedTextField(
-                        value = generationPrompt,
-                        onValueChange = onGenerationPromptChange,
-                        label = { Text(stringResource(R.string.generation_prompt)) },
-                        placeholder = { Text(stringResource(R.string.portrait_of_a_person_detailed_high_quality)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                        maxLines = 3,
-                        enabled = !isGenerating
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (isGenerating) {
-                            OutlinedButton(
-                                onClick = onCancelGeneration,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(stringResource(R.string.cancel))
-                            }
-                        } else {
-                            Button(
-                                onClick = onGenerate,
-                                modifier = Modifier.weight(1f),
-                                enabled = generationPrompt.isNotBlank()
-                            ) {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(stringResource(R.string.generate))
-                            }
-                        }
-                    }
-                }
+                AvatarPickerSection(
+                    imageBytes = imageBytes,
+                    forgeAvailable = forgeAvailable,
+                    generationPrompt = generationPrompt,
+                    isGenerating = isGenerating,
+                    generationProgress = generationProgress,
+                    canCancelGeneration = canCancelGeneration,
+                    onImageSelected = onImageSelected,
+                    onGenerationPromptChange = onGenerationPromptChange,
+                    onGenerate = onGenerate,
+                    onCancelGeneration = onCancelGeneration,
+                )
 
                 OutlinedTextField(
                     value = name,

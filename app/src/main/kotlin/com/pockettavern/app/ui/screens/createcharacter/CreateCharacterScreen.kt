@@ -238,22 +238,32 @@ private fun BasicTab(
                         maxLines = 3
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column {
                         val isGenerating = uiState.generationState is GenerationState.InProgress ||
                                 uiState.generationState is GenerationState.Starting
+                        val canCancel = uiState.imageGenCapabilities.supportsCancel
 
-                        if (isGenerating) {
-                            OutlinedButton(onClick = { viewModel.cancelGeneration() }) {
-                                Icon(Icons.Default.Close, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(stringResource(R.string.cancel))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (isGenerating) {
+                                OutlinedButton(onClick = { viewModel.cancelGeneration() }, enabled = canCancel) {
+                                    Icon(Icons.Default.Close, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(stringResource(R.string.cancel))
+                                }
+                            } else {
+                                FilledTonalButton(onClick = { viewModel.generateAvatar() }) {
+                                    Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(stringResource(R.string.generate))
+                                }
                             }
-                        } else {
-                            FilledTonalButton(onClick = { viewModel.generateAvatar() }) {
-                                Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(stringResource(R.string.generate))
-                            }
+                        }
+                        if (isGenerating && !canCancel) {
+                            Text(
+                                text = "This backend can't cancel a generation once started -- it'll run to completion.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 } else {

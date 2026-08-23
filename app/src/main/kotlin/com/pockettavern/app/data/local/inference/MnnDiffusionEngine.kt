@@ -129,7 +129,7 @@ class MnnDiffusionEngine @Inject constructor(
                     outputFile = file
                     val actualSeed = if (seed < 0) (0..Int.MAX_VALUE).random() else seed
 
-                    DebugLogger.log("MnnDiffusionEngine: generating ${width}x$height, $steps steps, cfg=$cfgScale")
+                    DebugLogger.log("MnnDiffusionEngine: generating ${width}x$height, $steps steps, cfg=$cfgScale, seed=$actualSeed, prompt=\"$prompt\"")
                     val ok = MnnDiffusionBridge.nativeGenerateXL(
                         handle, prompt, negativePrompt, file.absolutePath,
                         width, height, steps, actualSeed, cfgScale,

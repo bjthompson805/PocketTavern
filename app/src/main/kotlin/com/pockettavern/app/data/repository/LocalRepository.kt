@@ -283,6 +283,7 @@ class LocalRepository @Inject constructor(
             description = settingsDataStore.getUserPersonaDesc(),
             position = settingsDataStore.getUserPersonaPosition(),
             depth = settingsDataStore.getUserPersonaDepth(),
+            role = settingsDataStore.getUserPersonaRole(),
             avatarPath = settingsDataStore.getUserPersonaAvatarPath(),
             noSpeakForUser = settingsDataStore.getNoSpeakForUser()
         )
@@ -293,6 +294,7 @@ class LocalRepository @Inject constructor(
         settingsDataStore.saveUserPersonaDesc(persona.description)
         settingsDataStore.saveUserPersonaPosition(persona.position)
         settingsDataStore.saveUserPersonaDepth(persona.depth)
+        settingsDataStore.saveUserPersonaRole(persona.role)
         settingsDataStore.saveUserPersonaAvatarPath(persona.avatarPath)
         settingsDataStore.saveNoSpeakForUser(persona.noSpeakForUser)
     }

@@ -4,13 +4,15 @@ import android.content.Context
 import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pockettavern.app.data.repository.ForgeRepository
+import com.pockettavern.app.data.local.SettingsDataStore
+import com.pockettavern.app.data.repository.ImageGenRepository
 import com.pockettavern.app.data.repository.LocalRepository
 import com.pockettavern.app.data.repository.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import com.pockettavern.app.domain.model.ForgeGenerationParams
 import com.pockettavern.app.domain.model.GenerationState
+import com.pockettavern.app.domain.model.ImageGenCapabilities
 import com.pockettavern.app.domain.model.Persona
 import com.pockettavern.app.domain.model.PersonaPosition
 import com.pockettavern.app.domain.model.PersonaRole
@@ -39,11 +41,14 @@ data class PersonaUiState(
     val editDepth: Int = 2,
     val showDeleteConfirm: Boolean = false,
     val showCreateDialog: Boolean = false,
-    val createImageBytes: ByteArray? = null,
-    val createImageMimeType: String = "image/png",
+    // Shared by both the Create and Edit dialogs -- only one is ever open at a time, and both
+    // need the same picker/generate flow for the persona's one avatar image.
+    val avatarImageBytes: ByteArray? = null,
+    val avatarImageMimeType: String = "image/png",
     val createName: String = "",
     val createDescription: String = "",
     val forgeAvailable: Boolean = false,
+    val imageGenCapabilities: ImageGenCapabilities = ImageGenCapabilities(),
     val generationPrompt: String = "",
     val isGenerating: Boolean = false,
     val generationProgress: Float = 0f,
@@ -56,7 +61,8 @@ class PersonaViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val localRepository: LocalRepository,
     private val settingsRepository: SettingsRepository,
-    private val forgeRepository: ForgeRepository
+    private val imageGenRepository: ImageGenRepository,
+    private val settingsDataStore: SettingsDataStore
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PersonaUiState())
@@ -67,8 +73,9 @@ class PersonaViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             val settings = settingsRepository.getSettings()
+            val capabilities = imageGenRepository.getCapabilities()
             _uiState.update {
-                it.copy(forgeAvailable = settings.imageGenBackendConfigured)
+                it.copy(forgeAvailable = settings.imageGenBackendConfigured, imageGenCapabilities = capabilities)
             }
         }
         loadPersonas()
@@ -106,6 +113,12 @@ class PersonaViewModel @Inject constructor(
     }
 
     fun showEditDialog(persona: Persona) {
+        // Preload the current avatar's bytes so the picker shows what's actually saved, not
+        // blank -- savePersonaEdit() always writes avatarImageBytes back out, so leaving this
+        // null here would silently drop the avatar again the moment the user hits Save without
+        // touching the picker.
+        val avatarBytes = persona.avatarId.takeIf { it.isNotBlank() }
+            ?.let { path -> runCatching { File(path).readBytes() }.getOrNull() }
         _uiState.update {
             it.copy(
                 showEditDialog = true,
@@ -113,7 +126,11 @@ class PersonaViewModel @Inject constructor(
                 editDescription = persona.description,
                 editPosition = persona.position,
                 editRole = persona.role,
-                editDepth = persona.depth
+                editDepth = persona.depth,
+                avatarImageBytes = avatarBytes,
+                generationPrompt = "",
+                isGenerating = false,
+                generationProgress = 0f
             )
         }
     }
@@ -122,7 +139,8 @@ class PersonaViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 showEditDialog = false,
-                editingPersona = null
+                editingPersona = null,
+                avatarImageBytes = null
             )
         }
     }
@@ -150,18 +168,35 @@ class PersonaViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isSaving = true) }
             try {
-                val updated = UserPersona(
+                // Copy forward from the currently-stored persona, not a fresh UserPersona(...) --
+                // noSpeakForUser (a field this dialog has no control for) must carry over
+                // unchanged. Building a fresh UserPersona() here previously silently reset it (and
+                // avatarPath) to defaults on every single edit, discarding a real, already-
+                // generated avatar file even though the file itself was never touched -- confirmed
+                // the file survives on disk, only the DataStore reference was lost.
+                val current = (localRepository.getUserPersona() as? Result.Success)?.data
+                // Always rewritten from avatarImageBytes (preloaded from the existing file in
+                // showEditDialog() if the user doesn't touch the picker) -- see that function's
+                // comment for why leaving this unconditional matters.
+                val avatarPath = state.avatarImageBytes?.let { bytes ->
+                    val file = File(context.filesDir, "persona_avatar.png")
+                    file.writeBytes(bytes)
+                    file.absolutePath
+                } ?: current?.avatarPath
+                val updated = (current ?: UserPersona(name = persona.name)).copy(
                     name = persona.name,
                     description = state.editDescription,
                     position = state.editPosition.value,
                     depth = state.editDepth,
-                    role = state.editRole.value
+                    role = state.editRole.value,
+                    avatarPath = avatarPath
                 )
                 localRepository.saveUserPersona(updated)
                 _uiState.update {
                     it.copy(
                         isSaving = false,
                         showEditDialog = false,
+                        avatarImageBytes = null,
                         successMessage = "Persona updated"
                     )
                 }
@@ -208,8 +243,8 @@ class PersonaViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 showCreateDialog = true,
-                createImageBytes = null,
-                createImageMimeType = "image/png",
+                avatarImageBytes = null,
+                avatarImageMimeType = "image/png",
                 createName = "",
                 createDescription = "",
                 generationPrompt = "",
@@ -223,16 +258,16 @@ class PersonaViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 showCreateDialog = false,
-                createImageBytes = null
+                avatarImageBytes = null
             )
         }
     }
 
-    fun setCreateImage(bytes: ByteArray, mimeType: String) {
+    fun setAvatarImage(bytes: ByteArray, mimeType: String) {
         _uiState.update {
             it.copy(
-                createImageBytes = bytes,
-                createImageMimeType = mimeType
+                avatarImageBytes = bytes,
+                avatarImageMimeType = mimeType
             )
         }
     }
@@ -255,22 +290,27 @@ class PersonaViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isSaving = true) }
             try {
-                val avatarPath = state.createImageBytes?.let { bytes ->
+                val avatarPath = state.avatarImageBytes?.let { bytes ->
                     val file = File(context.filesDir, "persona_avatar.png")
                     file.writeBytes(bytes)
                     file.absolutePath
                 }
-                val updated = UserPersona(
+                // Copy forward position/depth/role/noSpeakForUser from whatever persona already
+                // exists -- this is a single-persona app (see class doc), so "Create" here really
+                // means "replace name/description/avatar," not "start over" (same reasoning as
+                // savePersonaEdit()'s fix).
+                val current = (localRepository.getUserPersona() as? Result.Success)?.data
+                val updated = (current ?: UserPersona()).copy(
                     name = state.createName.trim(),
                     description = state.createDescription,
-                    avatarPath = avatarPath
+                    avatarPath = avatarPath ?: current?.avatarPath
                 )
                 localRepository.saveUserPersona(updated)
                 _uiState.update {
                     it.copy(
                         isSaving = false,
                         showCreateDialog = false,
-                        createImageBytes = null,
+                        avatarImageBytes = null,
                         successMessage = "Persona updated to \"${state.createName.trim()}\""
                     )
                 }
@@ -296,16 +336,19 @@ class PersonaViewModel @Inject constructor(
         generationJob = viewModelScope.launch {
             _uiState.update { it.copy(isGenerating = true, generationProgress = 0f) }
 
+            val config = settingsDataStore.getImageGenConfig()
             val params = ForgeGenerationParams(
                 prompt = prompt,
-                negativePrompt = "blurry, low quality, distorted, deformed, bad anatomy, ugly, disfigured",
-                width = 512,
-                height = 512,
-                steps = 20,
-                cfgScale = 7f
+                negativePrompt = config.negativePrompt,
+                width = config.width,
+                height = config.height,
+                steps = config.steps,
+                cfgScale = config.cfgScale,
+                sampler = config.sampler,
+                seed = config.seed
             )
 
-            forgeRepository.generateImageWithProgress(params).collect { state ->
+            imageGenRepository.generateImageWithProgress(params).collect { state ->
                 when (state) {
                     is GenerationState.Starting -> {
                         _uiState.update { it.copy(generationProgress = 0f) }
@@ -318,8 +361,8 @@ class PersonaViewModel @Inject constructor(
                         _uiState.update {
                             it.copy(
                                 isGenerating = false,
-                                createImageBytes = imageBytes,
-                                createImageMimeType = "image/png"
+                                avatarImageBytes = imageBytes,
+                                avatarImageMimeType = "image/png"
                             )
                         }
                     }
@@ -340,7 +383,7 @@ class PersonaViewModel @Inject constructor(
     fun cancelGeneration() {
         generationJob?.cancel()
         viewModelScope.launch {
-            forgeRepository.interrupt()
+            imageGenRepository.interrupt()
             _uiState.update { it.copy(isGenerating = false, generationProgress = 0f) }
         }
     }

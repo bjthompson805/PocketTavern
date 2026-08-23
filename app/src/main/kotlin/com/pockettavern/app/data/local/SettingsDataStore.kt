@@ -88,6 +88,7 @@ class SettingsDataStore @Inject constructor(
         val USER_PERSONA_NAME = stringPreferencesKey("user_persona_name")
         val USER_PERSONA_DESC = stringPreferencesKey("user_persona_desc")
         val USER_PERSONA_POSITION = intPreferencesKey("user_persona_position")
+        val USER_PERSONA_ROLE = intPreferencesKey("user_persona_role")
         val USER_PERSONA_DEPTH = intPreferencesKey("user_persona_depth")
         val USER_PERSONA_AVATAR = stringPreferencesKey("user_persona_avatar")
         val USER_PERSONA_NO_SPEAK = booleanPreferencesKey("user_persona_no_speak")
@@ -299,6 +300,13 @@ class SettingsDataStore @Inject constructor(
 
     suspend fun saveUserPersonaPosition(position: Int) {
         context.dataStore.edit { prefs -> prefs[Keys.USER_PERSONA_POSITION] = position }
+    }
+
+    suspend fun getUserPersonaRole(): Int =
+        context.dataStore.data.map { it[Keys.USER_PERSONA_ROLE] ?: 0 }.first()
+
+    suspend fun saveUserPersonaRole(role: Int) {
+        context.dataStore.edit { prefs -> prefs[Keys.USER_PERSONA_ROLE] = role }
     }
 
     suspend fun getUserPersonaDepth(): Int =
