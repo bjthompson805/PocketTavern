@@ -78,8 +78,3 @@ lint/tmp/
 secrets.properties
 *SPEC*.md
 .kotlin/
-
-# Google Tensor NPU AOT compiler SDK (closed beta) -- redistribution terms not yet confirmed,
-# keep local-only until checked. Each dev machine must supply this file itself; see
-# docs/npu-unet-conversion.md for where it comes from.
-app/src/main/jniLibs/

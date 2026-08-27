@@ -266,8 +266,9 @@ code after the rename, and superseded by the real integration anyway).
   wipes this, rebuild+repush from `~/code/litert-torch/scratch/models/full_unet_wrapped/` into
   `npu-unet/<modelId>/` (`<modelId>` must match the corresponding `sd-models/<modelId>/` dir).
 - `app/src/main/jniLibs/arm64-v8a/libLiteRtDispatch_GoogleTensor.so` (the gated Tensor NPU SDK's
-  dispatch library) is gitignored — closed-beta redistribution terms haven't been confirmed, so
-  it's a local-only file each dev machine must supply itself, not something `git clone` provides.
+  dispatch library) is committed to the repo — the user confirmed they never agreed to any
+  redistribution restriction when granted closed-beta access, so it ships like any other
+  prebuilt native lib in this project.
 - Build: `./gradlew assembleDebug` from `~/code/PocketTavern`. Install:
   `adb install -r app/build/outputs/apk/debug/app-debug.apk`. Force a fresh `onCreate` (not just
   re-showing the activity) with `adb shell am force-stop com.pockettavern.app` before
