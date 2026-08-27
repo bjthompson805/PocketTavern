@@ -33,7 +33,8 @@ data class ApiConfigUiState(
     // On-device model download
     val isDownloading: Boolean = false,
     val downloadProgress: Float? = null,   // 0f..1f, or null when size unknown
-    val downloadStatus: String? = null
+    val downloadStatus: String? = null,
+    val notice: String? = null             // one-shot snackbar text for a download/delete outcome
 )
 
 @HiltViewModel
@@ -84,11 +85,16 @@ class ApiConfigViewModel @Inject constructor(
             val models = withContext(Dispatchers.IO) {
                 llmRepository.getAvailableModels(config)
             }
+            // On-device sources have their own dedicated "No models downloaded yet" empty state
+            // in OnDeviceModelSection -- an empty list there is normal (e.g. right after deleting
+            // the last local model), not a failure. The URL/API key error only makes sense for
+            // the network-fetched (cloud/server) branch.
+            val emptyIsError = models.isEmpty() && !config.isAnyOnDevice
             _uiState.update {
                 it.copy(
                     isLoadingModels = false,
                     availableModels = models,
-                    error = if (models.isEmpty()) "No models found — check URL, API key, and Debug Log" else null
+                    error = if (emptyIsError) "No models found — check URL, API key, and Debug Log" else null
                 )
             }
         }
@@ -199,13 +205,20 @@ class ApiConfigViewModel @Inject constructor(
                             it.copy(
                                 isDownloading = false, downloadProgress = null,
                                 downloadStatus = "Downloaded: $modelId",
+                                notice = "Downloaded: $modelId",
                                 config = it.config.copy(currentModel = modelId)
                             )
                         }
                         fetchModels()
                     }
                     is OnDeviceModelManager.Progress.Error -> {
-                        _uiState.update { it.copy(isDownloading = false, downloadProgress = null, downloadStatus = "Failed: ${p.message}") }
+                        _uiState.update {
+                            it.copy(
+                                isDownloading = false, downloadProgress = null,
+                                downloadStatus = "Failed: ${p.message}",
+                                notice = "Download failed: ${p.message}"
+                            )
+                        }
                     }
                 }
             }
@@ -219,6 +232,7 @@ class ApiConfigViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     downloadStatus = "Deleted: $modelId",
+                    notice = "Deleted: $modelId",
                     config = if (current == modelId) it.config.copy(currentModel = "") else it.config
                 )
             }
@@ -228,6 +242,10 @@ class ApiConfigViewModel @Inject constructor(
 
     fun clearDownloadStatus() {
         _uiState.update { it.copy(downloadStatus = null) }
+    }
+
+    fun clearNotice() {
+        _uiState.update { it.copy(notice = null) }
     }
 
     fun clearError() {

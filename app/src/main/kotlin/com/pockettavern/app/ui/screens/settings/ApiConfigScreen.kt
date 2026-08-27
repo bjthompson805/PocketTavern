@@ -48,6 +48,13 @@ fun ApiConfigScreen(
         }
     }
 
+    LaunchedEffect(uiState.notice) {
+        uiState.notice?.let { notice ->
+            snackbarHostState.showSnackbar(notice)
+            viewModel.clearNotice()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
