@@ -81,14 +81,14 @@ object OnDeviceModelCatalog {
             name = "Gemma 3 1B (q4)", category = "Recommended",
             description = "Small, capable. NPU-optimized on recent flagships. Gemma license.",
             url = "$LC/Gemma3-1B-IT/resolve/main/Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096.litertlm?download=true",
-            sizeBytes = 557 * MB, socVariants = GEMMA3_1B_SOC, topK = 64,
+            sizeBytes = 557 * MB, gated = true, socVariants = GEMMA3_1B_SOC, topK = 64,
         ),
         // ── Small / Fast ─────────────────────────────────────────────────────
         CatalogModel(
             name = "Gemma 3 270M (q8)", category = "Small / Fast",
             description = "Tiny — runs on almost anything. Limited quality. Gemma license.",
             url = "$LC/gemma-3-270m-it/resolve/main/gemma3-270m-it-q8.litertlm?download=true",
-            sizeBytes = 289 * MB, socVariants = GEMMA3_270M_SOC, topK = 64,
+            sizeBytes = 289 * MB, gated = true, socVariants = GEMMA3_270M_SOC, topK = 64,
         ),
         CatalogModel(
             name = "Qwen3 0.6B (int4)", category = "Small / Fast",
