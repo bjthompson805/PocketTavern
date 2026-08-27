@@ -31,7 +31,33 @@ class SdxlModelManager @Inject constructor(
         File(context.filesDir, "sd-models").apply { mkdirs() }
     }
 
+    // A Tensor-G5 NPU UNet bundle (36 RESHAPE-wrapped LiteRT .tflite pieces, see
+    // docs/npu-unet-conversion.md) is tied to one specific checkpoint's converted weights, so it
+    // is keyed by the same modelId as its MNN model set in sd-models/ -- there's no separate
+    // catalog/manifest, just a directory that either exists (and is non-empty) or doesn't. Not
+    // downloadable yet (see docs/npu-unet-conversion.md item #6); currently only reachable via
+    // manual adb push into npu-unet/<modelId>/.
+    private val npuUnetDir: File by lazy {
+        File(context.filesDir, "npu-unet").apply { mkdirs() }
+    }
+
     private fun modelDir(modelId: String): File = File(modelsDir, modelId)
+
+    private fun npuBundleDir(modelId: String): File = File(npuUnetDir, modelId)
+
+    /**
+     * Best-effort presence check (non-empty directory) -- NpuUnetEngine::Load() is the real,
+     * per-file validation on the native side; this is only used to decide whether to attempt NPU
+     * at all and to show a badge in Settings.
+     */
+    fun hasNpuBundle(modelId: String): Boolean {
+        val dir = npuBundleDir(modelId)
+        return dir.isDirectory && dir.list()?.isNotEmpty() == true
+    }
+
+    /** Absolute path to a model's NPU bundle directory, or null if none is present. */
+    fun npuBundlePathFor(modelId: String): String? =
+        npuBundleDir(modelId).takeIf { hasNpuBundle(modelId) }?.absolutePath
 
     private fun isComplete(dir: File): Boolean =
         REQUIRED_FILES.all { File(dir, it).let { f -> f.exists() && f.length() > 0 } }

@@ -16,6 +16,7 @@ import androidx.compose.material3.MenuAnchorType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -148,12 +149,15 @@ fun ImageGenSettingsScreen(
                                 SdxlModelSection(
                                     currentPath = config.localSdxlModelPath,
                                     models = uiState.sdxlModels,
+                                    npuAvailableModelIds = uiState.sdxlNpuAvailableModelIds,
+                                    runMode = config.sdxlRunModeType,
                                     isDownloading = uiState.isDownloadingSdxl,
                                     downloadProgress = uiState.sdxlDownloadProgress,
                                     downloadStatus = uiState.sdxlDownloadStatus,
                                     onSelectModel = viewModel::selectSdxlModel,
                                     onDownload = viewModel::downloadSdxlModel,
                                     onDelete = viewModel::deleteSdxlModel,
+                                    onRunModeChange = viewModel::updateSdxlRunMode,
                                 )
                             }
                             ImageGenBackendType.DALLE -> {
@@ -663,16 +667,20 @@ private fun ImageGenSectionCard(content: @Composable ColumnScope.() -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SdxlModelSection(
     currentPath: String,
     models: List<com.pockettavern.app.domain.model.AvailableModel>,
+    npuAvailableModelIds: Set<String>,
+    runMode: com.pockettavern.app.domain.model.SdxlRunMode,
     isDownloading: Boolean,
     downloadProgress: Float?,
     downloadStatus: String?,
     onSelectModel: (String) -> Unit,
     onDownload: (String, String?) -> Unit,
     onDelete: (String) -> Unit,
+    onRunModeChange: (com.pockettavern.app.domain.model.SdxlRunMode) -> Unit,
 ) {
     var url by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
@@ -701,6 +709,7 @@ private fun SdxlModelSection(
             Text("Downloaded model sets", style = MaterialTheme.typography.labelLarge)
             models.forEach { model ->
                 val isSelected = currentPath.isNotBlank() && currentPath.endsWith("/${model.id}")
+                val hasNpu = model.id in npuAvailableModelIds
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -713,10 +722,71 @@ private fun SdxlModelSection(
                         enabled = !isDownloading
                     )
                     Text(model.name, modifier = Modifier.weight(1f))
+                    if (hasNpu) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Text(
+                                text = "NPU",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     IconButton(onClick = { onDelete(model.id) }, enabled = !isDownloading) {
                         Icon(Icons.Default.Delete, contentDescription = "Delete ${model.name}")
                     }
                 }
+            }
+
+            HorizontalDivider()
+
+            val selectedModelId = models.firstOrNull { currentPath.endsWith("/${it.id}") }?.id
+            val selectedHasNpu = selectedModelId != null && selectedModelId in npuAvailableModelIds
+            Text("Run on", style = MaterialTheme.typography.labelLarge)
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                val options = com.pockettavern.app.domain.model.SdxlRunMode.entries
+                options.forEachIndexed { index, mode ->
+                    // NPU is unusable without a bundle for the selected model -- CPU/Auto remain
+                    // valid regardless (Auto silently behaves like CPU with no bundle).
+                    val optionEnabled = mode != com.pockettavern.app.domain.model.SdxlRunMode.NPU || selectedHasNpu
+                    SegmentedButton(
+                        selected = runMode == mode,
+                        onClick = { onRunModeChange(mode) },
+                        enabled = optionEnabled,
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                        // The default disabled-state colors read as barely-dimmed against this
+                        // app's dark theme -- confirmed on-device the NPU option looked identical
+                        // enabled vs. disabled. Force a real, unmistakable dim instead of relying
+                        // on SegmentedButtonDefaults' built-in disabled alpha.
+                        modifier = Modifier.alpha(if (optionEnabled) 1f else 0.4f)
+                    ) {
+                        Text(mode.name)
+                    }
+                }
+            }
+            Text(
+                text = when (runMode) {
+                    com.pockettavern.app.domain.model.SdxlRunMode.CPU ->
+                        "Always uses the MNN CPU backend (~30s/step)."
+                    com.pockettavern.app.domain.model.SdxlRunMode.NPU ->
+                        "Requires an NPU bundle for the selected model (~19s/step); fails instead of falling back to CPU."
+                    com.pockettavern.app.domain.model.SdxlRunMode.AUTO ->
+                        if (selectedHasNpu) "Selected model has an NPU bundle -- will use it (~19s/step)."
+                        else "Uses the MNN CPU backend (no NPU bundle for the selected model)."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (runMode != com.pockettavern.app.domain.model.SdxlRunMode.CPU && selectedHasNpu) {
+                Text(
+                    text = "NPU generation ignores negative prompt and CFG scale (batch-1 conditional-only).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 

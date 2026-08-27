@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.tasks.Sync
 
 plugins {
     alias(libs.plugins.android.application)
@@ -12,6 +13,28 @@ plugins {
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) load(f.inputStream())
+}
+
+// CMake needs libLiteRt.so for native link-time resolution. Resolve the same declared AAR that
+// packages LiteRT into the APK and extract its jni/ directory under build/, rather than relying
+// on AGP's content-hash-named transform cache.
+val liteRtNativeAar = configurations.detachedConfiguration(
+    dependencies.create("com.google.ai.edge.litert:litert:2.2.0@aar")
+)
+val liteRtJniDirectory = layout.buildDirectory.dir("generated/litert-jni")
+val extractLiteRtNative by tasks.registering(Sync::class) {
+    from({ zipTree(liteRtNativeAar.singleFile) }) {
+        include("jni/**")
+        eachFile { path = path.removePrefix("jni/") }
+        includeEmptyDirs = false
+    }
+    into(liteRtJniDirectory)
+}
+
+// Native CMake configuration can run before preBuild in a task graph, so make every configure
+// task explicitly depend on the extracted library it receives through LITERT_JNI_DIR.
+tasks.configureEach {
+    if (name.startsWith("configureCMake")) dependsOn(extractLiteRtNative)
 }
 
 android {
@@ -55,6 +78,7 @@ android {
                 // Force Release for the native side regardless of the app's own debug/release
                 // variant -- there's no reason to ship or test an unoptimized libMNN.so.
                 arguments += "-DCMAKE_BUILD_TYPE=Release"
+                arguments += "-DLITERT_JNI_DIR=${liteRtJniDirectory.get().asFile.absolutePath}"
                 // Without this, Ninja builds every default target CMake defines -- MNN_BUILD_LLM
                 // pulls in a pile of demo/tool executables (llm_demo, llm_bench, embedding_demo,
                 // quantize_llm, etc.) regardless of MNN_BUILD_TOOLS/MNN_BUILD_DEMO, none of which
@@ -102,6 +126,22 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    // litert:2.2.0 and litertlm-android:0.13.1 both bundle a same-named but DIFFERENT-content
+    // libLiteRt.so (only litert:2.2.0's implements the CompiledModel/NPU JNI surface litert-api
+    // needs). pickFirst can't target "which AAR" -- verified by inspecting the merged APK's
+    // extracted libLiteRt.so directly, don't assume.
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libLiteRt*.so"
+            // Without this, native libs are mmap'd uncompressed straight out of the APK zip
+            // instead of extracted to a real lib/arm64 directory on disk -- LiteRT's NPU dispatch
+            // loader does a literal directory scan for libLiteRtDispatch_*.so and finds nothing
+            // without it (confirmed: google-ai-edge/litert-samples' NPU sample carries the same
+            // flag with the same "needed for NPU runtimes" comment).
+            useLegacyPackaging = true
+        }
     }
 
     externalNativeBuild {
@@ -160,6 +200,13 @@ dependencies {
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
     // On-device GGUF inference via llama.cpp (Llamatik, MIT). Unlocks the GGUF ecosystem.
     implementation("com.llamatik:library:1.8.0")
+    // NPU (Google Tensor / Darwinn) AOT-compiled model execution via the official CompiledModel
+    // API. litert-api carries the Kotlin surface (CompiledModel, Environment, Accelerator,
+    // NpuAcceleratorProvider); litert carries the native libLiteRt.so implementing it -- they're
+    // separate Maven artifacts and litert-api does NOT pull litert in transitively (checked its
+    // .pom: only androidx.lifecycle/guava/coroutines-guava/play:ai-delivery).
+    implementation("com.google.ai.edge.litert:litert:2.2.0")
+    implementation("com.google.ai.edge.litert:litert-api:2.2.0")
 
     // DataStore
     implementation(libs.androidx.datastore.preferences)

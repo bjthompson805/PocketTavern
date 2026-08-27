@@ -96,6 +96,7 @@ class MnnDiffusionBackend(
             steps = params.steps,
             seed = params.seed,
             cfgScale = params.cfgScale,
+            runMode = settingsDataStore.getImageGenConfig().sdxlRunModeType,
         ).collect { progress ->
             when (progress) {
                 is MnnDiffusionEngine.Progress.Started -> emit(GenerationState.Starting)

@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <android/log.h>
 
+#include <chrono>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <string>
@@ -8,6 +10,7 @@
 #include <MNN/MNNForwardType.h>
 #include "diffusion/diffusion.hpp"
 #include "diffusion/stable_diffusion_xl.hpp"
+#include "npu/NpuUnetEngine.hpp"
 
 #define LOG_TAG "PocketTavernDiffusion"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -88,13 +91,30 @@ extern "C" {
 // mnn_sdxl_android_pipeline memory) and there is currently no other real choice.
 JNIEXPORT jlong JNICALL
 Java_com_pockettavern_app_data_local_inference_MnnDiffusionBridge_nativeCreate(
-        JNIEnv* env, jobject /*thiz*/, jstring modelPath, jint modelType, jint memoryMode) {
+        JNIEnv* env, jobject /*thiz*/, jstring modelPath, jint modelType, jint memoryMode,
+        jstring npuUnetModelPath, jstring dispatchLibDir) {
     std::string path = jstringToStd(env, modelPath);
+    std::string npuPath = jstringToStd(env, npuUnetModelPath);
+    std::string dispatchPath = jstringToStd(env, dispatchLibDir);
     auto* diffusion = Diffusion::createDiffusion(
             path, static_cast<DiffusionModelType>(modelType), MNN_FORWARD_CPU, memoryMode);
     if (diffusion == nullptr) {
         LOGE("createDiffusion returned null for modelType=%d path=%s", modelType, path.c_str());
         return 0;
+    }
+    if (!npuPath.empty()) {
+        if (modelType != STABLE_DIFFUSION_XL) {
+            LOGE("NPU UNet was requested for unsupported diffusion modelType=%d", modelType);
+            delete diffusion;
+            return 0;
+        }
+        auto* sdxl = static_cast<StableDiffusionXL*>(diffusion);
+        if (!sdxl->configureNpuUnet(std::move(npuPath), std::move(dispatchPath))) {
+            LOGE("Failed to configure NPU UNet");
+            delete diffusion;
+            return 0;
+        }
+        LOGE("Configured LiteRT NPU UNet for SDXL");
     }
     return reinterpret_cast<jlong>(diffusion);
 }
@@ -146,6 +166,71 @@ Java_com_pockettavern_app_data_local_inference_MnnDiffusionBridge_nativeDestroy(
     // Diffusion's destructor is virtual -- deleting through the base pointer correctly runs
     // ~StableDiffusionXL() (or whichever concrete type), no downcast needed for this call.
     delete reinterpret_cast<Diffusion*>(handle);
+}
+
+// THROWAWAY smoke test for NpuUnetEngine (see npu/NpuUnetEngine.hpp) -- confirms the native
+// LiteRT C API integration actually works on-device (Load() + one real forward() call with
+// synthetic sin() input, same generation formula NpuDiagnostic.kt's runFullUnetSeparate used in
+// Kotlin all session) before wiring it into StableDiffusionXL::unet()'s real call site. Not part
+// of MnnDiffusionBridge on purpose -- this has nothing to do with the MNN pipeline; delete once
+// the real unet() integration lands and this is superseded.
+//
+// modelDir: <filesDir>/unet_wrapped (the 36 wrapped piece files, already pushed for
+// NpuDiagnostic.kt's own testing this session).
+// dispatchLibDir: context.applicationInfo.nativeLibraryDir (where
+// libLiteRtDispatch_GoogleTensor.so lives on-device) -- C++ has no way to derive this itself,
+// must come from Kotlin.
+JNIEXPORT jstring JNICALL
+Java_com_pockettavern_app_util_NpuDiagnostic_nativeRunUnetEngineSmoke(
+        JNIEnv* env, jclass /*clazz*/, jstring modelDir, jstring dispatchLibDir) {
+    std::string modelDirStd = jstringToStd(env, modelDir);
+    std::string dispatchLibDirStd = jstringToStd(env, dispatchLibDir);
+
+    pockettavern::NpuUnetEngine engine;
+    if (!engine.Load(modelDirStd, dispatchLibDirStd)) {
+        return env->NewStringUTF("FAILED: Load() returned false, see logcat tag PocketTavernDiffusion");
+    }
+
+    pockettavern::NpuUnetInputs inputs;
+    auto fill = [](std::vector<float>* v, size_t n) {
+        v->resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            (*v)[i] = static_cast<float>(std::sin(static_cast<double>(i)) * 0.1);
+        }
+    };
+    fill(&inputs.sample, 1 * 4 * 128 * 128);
+    fill(&inputs.t_emb, 1 * 320);
+    fill(&inputs.text_embeds, 1 * 1280);
+    fill(&inputs.time_ids, 1 * 6);
+    fill(&inputs.encoder_hidden_states, 1 * 77 * 2048);
+
+    std::vector<float> out;
+    auto start = std::chrono::steady_clock::now();
+    bool ok = engine.forward(inputs, &out);
+    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+    if (!ok) {
+        return env->NewStringUTF("FAILED: forward() returned false, see logcat tag PocketTavernDiffusion");
+    }
+
+    bool hasNanOrInf = false;
+    float maxAbs = 0.0f;
+    for (float v : out) {
+        if (std::isnan(v) || std::isinf(v)) hasNanOrInf = true;
+        float a = std::fabs(v);
+        if (a > maxAbs) maxAbs = a;
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "OK elapsedMs=%lld outputSize=%zu hasNanOrInf=%d maxAbs=%f out[0..4]=%f,%f,%f,%f,%f",
+             static_cast<long long>(elapsedMs), out.size(), hasNanOrInf, maxAbs,
+             out.size() > 0 ? out[0] : 0.f, out.size() > 1 ? out[1] : 0.f,
+             out.size() > 2 ? out[2] : 0.f, out.size() > 3 ? out[3] : 0.f,
+             out.size() > 4 ? out[4] : 0.f);
+    LOGE("NpuUnetEngine smoke test: %s", buf);
+    return env->NewStringUTF(buf);
 }
 
 }  // extern "C"

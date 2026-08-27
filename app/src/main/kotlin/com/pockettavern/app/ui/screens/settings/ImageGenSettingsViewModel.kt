@@ -10,6 +10,7 @@ import com.pockettavern.app.domain.model.ImageGenBackendType
 import com.pockettavern.app.domain.model.ImageGenCapabilities
 import com.pockettavern.app.domain.model.ImageGenConfig
 import com.pockettavern.app.domain.model.Result
+import com.pockettavern.app.domain.model.SdxlRunMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +32,9 @@ data class ImageGenSettingsUiState(
     val isLoadingModels: Boolean = false,
     // On-device SDXL (MNN) model sets
     val sdxlModels: List<AvailableModel> = emptyList(),
+    // Subset of sdxlModels' ids that also have a Tensor NPU bundle downloaded -- drives the "NPU"
+    // badge in SdxlModelSection and whether the NPU run-mode option is actually usable.
+    val sdxlNpuAvailableModelIds: Set<String> = emptySet(),
     val isDownloadingSdxl: Boolean = false,
     val sdxlDownloadProgress: Float? = null,
     val sdxlDownloadStatus: String? = null,
@@ -63,7 +67,21 @@ class ImageGenSettingsViewModel @Inject constructor(
     }
 
     private fun refreshSdxlModels() {
-        _uiState.update { it.copy(sdxlModels = sdxlModelManager.listModels()) }
+        val models = sdxlModelManager.listModels()
+        _uiState.update {
+            it.copy(
+                sdxlModels = models,
+                sdxlNpuAvailableModelIds = models.map { m -> m.id }
+                    .filter { id -> sdxlModelManager.hasNpuBundle(id) }
+                    .toSet(),
+            )
+        }
+    }
+
+    fun updateSdxlRunMode(mode: SdxlRunMode) {
+        val modelId = _uiState.value.config.localSdxlModelPath.substringAfterLast('/')
+        if (modelId.isBlank()) return
+        updateConfig { it.copy(sdxlRunModeByModel = it.sdxlRunModeByModel + (modelId to mode.name)) }
     }
 
     fun selectSdxlModel(modelId: String) {

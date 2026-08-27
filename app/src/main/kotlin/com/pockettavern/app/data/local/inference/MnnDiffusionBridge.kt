@@ -15,7 +15,13 @@ object MnnDiffusionBridge {
     }
 
     /** Returns an opaque native handle (0 on failure), or 0 if createDiffusion() returned null. */
-    external fun nativeCreate(modelPath: String, modelType: Int, memoryMode: Int): Long
+    external fun nativeCreate(
+        modelPath: String,
+        modelType: Int,
+        memoryMode: Int,
+        npuUnetModelPath: String,
+        dispatchLibDir: String,
+    ): Long
 
     external fun nativeLoad(handle: Long): Boolean
 

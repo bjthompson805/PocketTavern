@@ -25,6 +25,17 @@ enum class ImageGenBackendType {
         }
 }
 
+enum class SdxlRunMode {
+    // Use the NPU UNet bundle if the selected model has one downloaded, else fall back to MNN CPU.
+    AUTO,
+    // Always use MNN CPU, even if an NPU bundle is present for the selected model.
+    CPU,
+    // Require the NPU bundle for the selected model; MnnDiffusionEngine reports an error instead
+    // of silently falling back to CPU if none is present, since NPU is ~1.5x faster per step and
+    // a silent CPU fallback would burn several extra minutes without the user realizing why.
+    NPU
+}
+
 data class ImageGenCapabilities(
     val supportsSamplers: Boolean = false,
     val supportsSchedulers: Boolean = false,
@@ -67,6 +78,13 @@ data class ImageGenConfig(
     // see mnn_sdxl_android_pipeline memory for how this gets produced. Populated via
     // SdxlModelManager's download-by-URL flow (ImageGenSettingsScreen's SdxlModelSection).
     val localSdxlModelPath: String = "",
+    // Per-model run-mode memory (SdxlRunMode name string, keyed by SdxlModelManager modelId) --
+    // NOT a single global setting: switching the selected model must not carry e.g. "NPU" over
+    // onto a model with no NPU bundle (that model's NPU option is disabled in the UI, and NPU
+    // mode fails outright rather than silently falling back -- see MnnDiffusionEngine). Missing
+    // entries (a model never explicitly set) default to AUTO via sdxlRunModeFor()/sdxlRunModeType
+    // below. A plain Map<String,String> serializes for free on the existing single-blob JSON.
+    val sdxlRunModeByModel: Map<String, String> = emptyMap(),
     val sdModel: String = "",
     val sampler: String = "Euler",
     val scheduler: String = "",
@@ -84,6 +102,17 @@ data class ImageGenConfig(
         } catch (_: Exception) {
             ImageGenBackendType.SD_WEBUI
         }
+
+    fun sdxlRunModeFor(modelId: String): SdxlRunMode = try {
+        sdxlRunModeByModel[modelId]?.let { SdxlRunMode.valueOf(it) } ?: SdxlRunMode.AUTO
+    } catch (_: Exception) {
+        SdxlRunMode.AUTO
+    }
+
+    /** Run mode for whichever model localSdxlModelPath currently points at. */
+    val sdxlRunModeType: SdxlRunMode
+        get() = localSdxlModelPath.substringAfterLast('/').takeIf { it.isNotBlank() }
+            ?.let { sdxlRunModeFor(it) } ?: SdxlRunMode.AUTO
 
     /**
      * Whether the currently active backend has its required connection info filled in --

@@ -3,7 +3,9 @@ package com.pockettavern.app.data.local.inference
 import android.content.Context
 import android.util.Base64
 import com.pockettavern.app.GenerationService
+import com.pockettavern.app.domain.model.SdxlRunMode
 import com.pockettavern.app.util.DebugLogger
+import com.pockettavern.app.util.OnDeviceImageGenerationScreenState
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -35,7 +37,8 @@ import javax.inject.Singleton
 @Singleton
 class MnnDiffusionEngine @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val memoryManager: OnDeviceMemoryManager
+    private val memoryManager: OnDeviceMemoryManager,
+    private val sdxlModelManager: SdxlModelManager,
 ) {
     sealed class Progress {
         object Started : Progress()
@@ -49,6 +52,7 @@ class MnnDiffusionEngine @Inject constructor(
 
     private var handle: Long = 0
     private var loadedModelPath: String? = null
+    private var loadedRunMode: SdxlRunMode? = null
 
     val isLoaded: Boolean get() = handle != 0L
 
@@ -56,8 +60,8 @@ class MnnDiffusionEngine @Inject constructor(
         memoryManager.register(OnDeviceMemoryManager.Slot.SDXL, ::unload)
     }
 
-    private suspend fun ensureLoaded(modelPath: String) = lock.withLock {
-        if (loadedModelPath == modelPath && handle != 0L) return@withLock
+    private suspend fun ensureLoaded(modelPath: String, runMode: SdxlRunMode) = lock.withLock {
+        if (loadedModelPath == modelPath && loadedRunMode == runMode && handle != 0L) return@withLock
 
         val modelBytes = File(modelPath).walkTopDown().filter { it.isFile }.sumOf { it.length() }
         memoryManager.prepareLoad(OnDeviceMemoryManager.Slot.SDXL, modelBytes)
@@ -66,10 +70,40 @@ class MnnDiffusionEngine @Inject constructor(
             MnnDiffusionBridge.nativeDestroy(handle)
             handle = 0
             loadedModelPath = null
+            loadedRunMode = null
         }
 
-        DebugLogger.log("MnnDiffusionEngine: creating+loading $modelPath")
-        val newHandle = MnnDiffusionBridge.nativeCreate(modelPath, MODEL_TYPE_SDXL, MEMORY_MODE_FAST)
+        DebugLogger.log("MnnDiffusionEngine: creating+loading $modelPath (runMode=$runMode)")
+        // An NPU bundle's converted UNet pieces contain one specific checkpoint's baked-in
+        // weights. They must never be paired with another SDXL model set: shapes match, but the
+        // result would be a silently incoherent mixture of checkpoints -- SdxlModelManager keys
+        // bundles by the same modelId as their MNN model set for exactly this reason. CPU mode
+        // forces MNN regardless of whether a bundle exists; NPU mode requires one to exist.
+        val modelId = File(modelPath).name
+        val npuBundlePath = sdxlModelManager.npuBundlePathFor(modelId)
+        if (runMode == SdxlRunMode.NPU && npuBundlePath == null) {
+            throw IllegalStateException(
+                "NPU run mode was selected but no NPU bundle is downloaded for \"$modelId\" -- " +
+                    "switch to Auto or CPU, or select a model with an NPU bundle"
+            )
+        }
+        val npuUnetModelPath = when (runMode) {
+            SdxlRunMode.CPU -> ""
+            SdxlRunMode.AUTO, SdxlRunMode.NPU -> npuBundlePath.orEmpty()
+        }
+        if (npuUnetModelPath.isNotEmpty()) {
+            DebugLogger.log(
+                "MnnDiffusionEngine: using batch-1 conditional-only LiteRT NPU UNet " +
+                    "(negative prompt and CFG scale are intentionally ignored)"
+            )
+        }
+        val newHandle = MnnDiffusionBridge.nativeCreate(
+            modelPath,
+            MODEL_TYPE_SDXL,
+            MEMORY_MODE_FAST,
+            npuUnetModelPath,
+            context.applicationInfo.nativeLibraryDir,
+        )
         if (newHandle == 0L) {
             throw IllegalStateException(
                 "MNN failed to create the diffusion pipeline (bad model path, or malformed/missing model files at $modelPath)"
@@ -81,6 +115,7 @@ class MnnDiffusionEngine @Inject constructor(
         }
         handle = newHandle
         loadedModelPath = modelPath
+        loadedRunMode = runMode
         DebugLogger.log("MnnDiffusionEngine: loaded")
     }
 
@@ -116,6 +151,7 @@ class MnnDiffusionEngine @Inject constructor(
         steps: Int,
         seed: Int,
         cfgScale: Float,
+        runMode: SdxlRunMode = SdxlRunMode.AUTO,
     ): Flow<Progress> = callbackFlow {
         GenerationService.start(context, "Generating image on-device…")
 
@@ -128,10 +164,13 @@ class MnnDiffusionEngine @Inject constructor(
 
         val job = launch(Dispatchers.IO) {
             var outputFile: File? = null
+            var keepsScreenOn = false
             try {
                 genMutex.withLock {
                     trySend(Progress.Started)
-                    ensureLoaded(modelPath)
+                    ensureLoaded(modelPath, runMode)
+                    OnDeviceImageGenerationScreenState.begin()
+                    keepsScreenOn = true
 
                     val file = File(context.cacheDir, "mnn_gen_${System.currentTimeMillis()}.png")
                     outputFile = file
@@ -157,6 +196,7 @@ class MnnDiffusionEngine @Inject constructor(
                 DebugLogger.logError("MnnDiffusionEngine", "generation failed", e)
                 trySend(Progress.Error(e.message ?: "On-device SDXL generation failed"))
             } finally {
+                if (keepsScreenOn) OnDeviceImageGenerationScreenState.end()
                 outputFile?.delete()
                 heartbeat.cancel()
                 GenerationService.stop(context)
@@ -175,6 +215,7 @@ class MnnDiffusionEngine @Inject constructor(
             MnnDiffusionBridge.nativeDestroy(handle)
             handle = 0
             loadedModelPath = null
+            loadedRunMode = null
         }
     }
 

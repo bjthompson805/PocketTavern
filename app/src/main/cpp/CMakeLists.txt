@@ -50,15 +50,48 @@ set(MNN_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 # INSTALL(...) call instead when set, avoiding the restriction entirely.
 set(MNN_BUILD_FOR_ANDROID_COMMAND ON CACHE BOOL "" FORCE)
 
+# NpuUnetEngine is called from StableDiffusionXL, which MNN links into libMNN.so itself. Gradle
+# extracts the declared LiteRT AAR's jni/ directory under build/ and supplies its location here;
+# this intentionally avoids depending on an AGP transform-cache hash.
+if(NOT DEFINED LITERT_JNI_DIR)
+    message(FATAL_ERROR "LITERT_JNI_DIR must be supplied by app/build.gradle.kts")
+endif()
+set(LITERT_SO_PATH "${LITERT_JNI_DIR}/${ANDROID_ABI}/libLiteRt.so")
+if(NOT EXISTS "${LITERT_SO_PATH}")
+    message(FATAL_ERROR "LiteRT native library not found: ${LITERT_SO_PATH}")
+endif()
+add_library(LiteRt SHARED IMPORTED)
+set_target_properties(LiteRt PROPERTIES IMPORTED_LOCATION "${LITERT_SO_PATH}")
+
 add_subdirectory(MNN)
+
+# StableDiffusionXL optionally calls the app-owned LiteRT NPU UNet implementation. Its sources
+# are compiled by MNN's separate `diffusion` object target (not the final MNN archive target),
+# while pockettavern_diffusion supplies NpuUnetEngine.cpp and libLiteRt at final link time.
+target_include_directories(diffusion PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/litert_headers
+)
+target_sources(MNN PRIVATE npu/NpuUnetEngine.cpp)
+target_include_directories(MNN PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/litert_headers
+)
+target_link_libraries(MNN PRIVATE LiteRt log)
 
 add_library(pockettavern_diffusion SHARED
     jni_diffusion.cpp
+    # The throwaway JNI smoke diagnostic constructs its own NpuUnetEngine. Production SDXL uses
+    # libMNN.so's copy above; MNN hides internal symbols, so this keeps the diagnostic linkable
+    # until that JNI entry point is removed after end-to-end validation.
+    npu/NpuUnetEngine.cpp
 )
 
 target_include_directories(pockettavern_diffusion PRIVATE
+    .
     MNN/include
     MNN/transformers/diffusion/engine/include
+    litert_headers
 )
 
 # static_cast (not dynamic_cast) is used deliberately in jni_diffusion.cpp instead of RTTI --
@@ -66,7 +99,18 @@ target_include_directories(pockettavern_diffusion PRIVATE
 # typeinfo compatibility across translation units built with different -frtti settings isn't
 # something to rely on. static_cast is safe here because this JNI layer is the one place that
 # calls Diffusion::createDiffusion() and always knows the real dynamic type it asked for.
+#
+# NpuUnetEngine links directly against libLiteRt.so's real C API (litert/c/*.h, headers vendored
+# under litert_headers/ from google-ai-edge/LiteRT's public repo) -- NOT the Kotlin/JNI wrapper.
+# libLiteRt.so itself is NOT bundled here or staged into jniLibs/: it already ships via the app's
+# own `litert:2.2.0` Gradle dependency (see build.gradle.kts), which Gradle merges into the final
+# APK automatically. Manually staging a second copy (the way libLiteRtDispatch_GoogleTensor.so
+# is staged, since THAT one has no other source -- it's part of the gated Tensor NPU SDK, not any
+# public artifact) would conflict with that AAR-provided copy at packaging time. The imported
+# target above is for build-time symbol resolution only.
+#
 target_link_libraries(pockettavern_diffusion
     MNN
+    LiteRt
     log
 )
