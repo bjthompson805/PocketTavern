@@ -8,12 +8,12 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <vector>
-
+#include <sys/stat.h>
 #include <MNN/MNNForwardType.h>
 #include "diffusion/diffusion.hpp"
 #include "diffusion/stable_diffusion_xl.hpp"
 #include "npu/NpuUnetEngine.hpp"
+#include "npu/NpuTextEncoderEngine.hpp"
 
 #define LOG_TAG "PocketTavernDiffusion"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -125,17 +125,44 @@ Java_com_pockettavern_app_data_local_inference_MnnDiffusionBridge_nativeCreate(
     }
     if (!npuPath.empty()) {
         if (modelType != STABLE_DIFFUSION_XL) {
-            LOGE("NPU UNet was requested for unsupported diffusion modelType=%d", modelType);
+            LOGE("NPU was requested for unsupported diffusion modelType=%d", modelType);
             delete diffusion;
             return 0;
         }
         auto* sdxl = static_cast<StableDiffusionXL*>(diffusion);
-        if (!sdxl->configureNpuUnet(std::move(npuPath), std::move(dispatchPath))) {
-            LOGE("Failed to configure NPU UNet");
-            delete diffusion;
-            return 0;
+
+        std::string unetDir = npuPath;
+        std::string teDir = npuPath;
+        struct stat st{};
+        if (::stat((npuPath + "/unet").c_str(), &st) == 0) {
+            unetDir = npuPath + "/unet";
         }
-        LOGE("Configured LiteRT NPU UNet for SDXL");
+        if (::stat((npuPath + "/text_encoder").c_str(), &st) == 0) {
+            teDir = npuPath + "/text_encoder";
+        }
+
+        // Configure NPU UNet if UNet piece files exist
+        if (::stat((unetDir + "/unet_piece_00_embed.tflite").c_str(), &st) == 0 ||
+            ::stat((unetDir + "/unet_piece_00_embed_b2.tflite").c_str(), &st) == 0 ||
+            ::stat((npuPath + "/unet_piece_00_embed.tflite").c_str(), &st) == 0) {
+            if (!sdxl->configureNpuUnet(unetDir, dispatchPath)) {
+                LOGE("Failed to configure NPU UNet");
+                delete diffusion;
+                return 0;
+            }
+            LOGE("Configured LiteRT NPU UNet for SDXL from %s", unetDir.c_str());
+        }
+
+        // Configure NPU Text Encoder if Text Encoder piece files exist
+        if (::stat((teDir + "/text_encoder_b2_wrapped.tflite").c_str(), &st) == 0 ||
+            ::stat((npuPath + "/text_encoder_b2_wrapped.tflite").c_str(), &st) == 0) {
+            if (!sdxl->configureNpuTextEncoder(teDir, dispatchPath)) {
+                LOGE("Failed to configure NPU Text Encoder");
+                delete diffusion;
+                return 0;
+            }
+            LOGE("Configured LiteRT NPU Text Encoder for SDXL from %s", teDir.c_str());
+        }
     }
     return reinterpret_cast<jlong>(diffusion);
 }
@@ -474,6 +501,60 @@ Java_com_pockettavern_app_util_NpuDiagnostic_nativeRunParallelBatch1FileStep(
     snprintf(buf, sizeof(buf), "STEP_DONE %lldms outputSize=%zu", static_cast<long long>(elapsedMs),
              uncondOutput.size());
     LOGE("NpuUnetEngine parallel batch-1 file step: %s", buf);
+    return env->NewStringUTF(buf);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_pockettavern_app_util_NpuDiagnostic_nativeRunTextEncoderEngineSmoke(
+        JNIEnv* env, jclass /*clazz*/, jstring modelDir, jstring dispatchLibDir) {
+    std::string modelDirStd = jstringToStd(env, modelDir);
+    std::string dispatchLibDirStd = jstringToStd(env, dispatchLibDir);
+
+    pockettavern::NpuTextEncoderEngine engine;
+    if (!engine.Load(modelDirStd, dispatchLibDirStd)) {
+        return env->NewStringUTF("FAILED: Load() returned false, see logcat tag PocketTavernDiffusion");
+    }
+
+    // Synthetic tokens: 2 rows of 77 tokens (bos=49406, eos=49407)
+    std::vector<int32_t> ids1(2 * 77, 0);
+    std::vector<int32_t> ids2(2 * 77, 0);
+    ids1[0] = 49406; ids1[76] = 49407;
+    ids1[77] = 49406; ids1[153] = 49407;
+    ids2[0] = 49406; ids2[76] = 49407;
+    ids2[77] = 49406; ids2[153] = 49407;
+
+    std::vector<float> encoderHiddenStates;
+    std::vector<float> textEmbeds;
+    const auto start = std::chrono::steady_clock::now();
+    bool ok = engine.encode(ids1, ids2, &encoderHiddenStates, &textEmbeds);
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+    if (!ok) {
+        return env->NewStringUTF("FAILED: encode() returned false, see logcat tag PocketTavernDiffusion");
+    }
+
+    bool hasNanOrInf = false;
+    for (float v : encoderHiddenStates) {
+        if (std::isnan(v) || std::isinf(v)) hasNanOrInf = true;
+    }
+    for (float v : textEmbeds) {
+        if (std::isnan(v) || std::isinf(v)) hasNanOrInf = true;
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "OK elapsedMs=%lld hiddenSize=%zu embedsSize=%zu hasNanOrInf=%d hidden[0..3]=%f,%f,%f,%f embeds[0..3]=%f,%f,%f,%f",
+             static_cast<long long>(elapsedMs), encoderHiddenStates.size(), textEmbeds.size(), hasNanOrInf,
+             encoderHiddenStates.size() > 0 ? encoderHiddenStates[0] : 0.f,
+             encoderHiddenStates.size() > 1 ? encoderHiddenStates[1] : 0.f,
+             encoderHiddenStates.size() > 2 ? encoderHiddenStates[2] : 0.f,
+             encoderHiddenStates.size() > 3 ? encoderHiddenStates[3] : 0.f,
+             textEmbeds.size() > 0 ? textEmbeds[0] : 0.f,
+             textEmbeds.size() > 1 ? textEmbeds[1] : 0.f,
+             textEmbeds.size() > 2 ? textEmbeds[2] : 0.f,
+             textEmbeds.size() > 3 ? textEmbeds[3] : 0.f);
+    LOGE("NpuTextEncoderEngine smoke test: %s", buf);
     return env->NewStringUTF(buf);
 }
 

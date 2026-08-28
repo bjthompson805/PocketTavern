@@ -46,6 +46,37 @@ class MainActivity : ComponentActivity() {
         if (BuildConfig.DEBUG && intent.getBooleanExtra("run_npu_unet_parallel_cfg_step", false)) {
             Thread { NpuDiagnostic.runParallelBatch1FileStep(applicationContext) }.start()
         }
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("run_npu_text_encoder_smoke", false)) {
+            Thread { NpuDiagnostic.runNativeTextEncoderEngineSmoke(applicationContext) }.start()
+        }
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("run_sdxl_npu_e2e_test", false)) {
+            Thread { NpuDiagnostic.runEndToEndSdxlNpuGenerationTest(applicationContext) }.start()
+        }
+        // Explicit debug-only command hook: does the FLUX.2 [klein] single_blocks.0 AOT-compiled
+        // artifact actually run on real Tensor G5 hardware, and match the PyTorch reference? See
+        // NpuDiagnostic.runKleinSingle0 and docs/flux2-klein-conversion.md.
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("run_klein_single0_npu_diagnostic", false)) {
+            Thread { NpuDiagnostic.runKleinSingle0(applicationContext) }.start()
+        }
+        // Explicit debug-only command hook: same as run_klein_single0_npu_diagnostic but using the
+        // 80-token probe-shape artifact (single0_Google_Tensor_G5.tflite) with synthetic inputs --
+        // isolates whether the real-shape Darwinn fault is token-count/buffer-size dependent.
+        // See NpuDiagnostic.runKleinSingle0SmallShape and docs/flux2-klein-conversion.md step 6.
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("run_klein_single0_small_shape_diagnostic", false)) {
+            Thread { NpuDiagnostic.runKleinSingle0SmallShape(applicationContext) }.start()
+        }
+        // Generalized token-count probe for binary-searching the Darwinn DMA limit.
+        // Requires extras: --es klein_token_probe_file <filename> --ei klein_token_probe_tokens <N>
+        // See NpuDiagnostic.runKleinTokenProbe and scratch/build_klein_token_bisect.sh.
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("run_klein_token_probe", false)) {
+            val file = intent.getStringExtra("klein_token_probe_file") ?: ""
+            val tokens = intent.getIntExtra("klein_token_probe_tokens", -1)
+            if (file.isNotBlank() && tokens > 0) {
+                Thread { NpuDiagnostic.runKleinTokenProbe(applicationContext, file, tokens) }.start()
+            } else {
+                android.util.Log.w("MainActivity", "run_klein_token_probe: missing or invalid file/tokens extras")
+            }
+        }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try {

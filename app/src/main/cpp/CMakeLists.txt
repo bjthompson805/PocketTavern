@@ -72,7 +72,7 @@ target_include_directories(diffusion PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/litert_headers
 )
-target_sources(MNN PRIVATE npu/NpuUnetEngine.cpp)
+target_sources(MNN PRIVATE npu/NpuUnetEngine.cpp npu/NpuTextEncoderEngine.cpp)
 target_include_directories(MNN PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/litert_headers
@@ -81,10 +81,11 @@ target_link_libraries(MNN PRIVATE LiteRt log)
 
 add_library(pockettavern_diffusion SHARED
     jni_diffusion.cpp
-    # The throwaway JNI smoke diagnostic constructs its own NpuUnetEngine. Production SDXL uses
-    # libMNN.so's copy above; MNN hides internal symbols, so this keeps the diagnostic linkable
-    # until that JNI entry point is removed after end-to-end validation.
+    # The throwaway JNI smoke diagnostic constructs its own NpuUnetEngine and NpuTextEncoderEngine.
+    # Production SDXL uses libMNN.so's copy above; MNN hides internal symbols, so this keeps
+    # the diagnostic linkable until that JNI entry point is removed after end-to-end validation.
     npu/NpuUnetEngine.cpp
+    npu/NpuTextEncoderEngine.cpp
 )
 
 target_include_directories(pockettavern_diffusion PRIVATE

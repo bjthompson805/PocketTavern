@@ -59,6 +59,75 @@ object NpuDiagnostic {
         Log.i(TAG, "NATIVE_UNET_ENGINE_SMOKE: $result")
     }
 
+    private external fun nativeRunTextEncoderEngineSmoke(modelDir: String, dispatchLibDir: String): String
+
+    fun runNativeTextEncoderEngineSmoke(context: Context) {
+        try {
+            System.loadLibrary("pockettavern_diffusion")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "=== native TextEncoderEngine smoke test: FAILED to load pockettavern_diffusion ===", e)
+            return
+        }
+        val modelDir = File(context.filesDir, "npu-unet/pureTukanoNSFW-xl")
+        if (!modelDir.exists()) {
+            Log.w(TAG, "$modelDir not found, skipping native TextEncoderEngine smoke test")
+            return
+        }
+        val dispatchLibDir = context.applicationInfo.nativeLibraryDir
+        Log.i(TAG, "=== native TextEncoderEngine smoke test starting (modelDir=$modelDir dispatchLibDir=$dispatchLibDir) ===")
+        val result = nativeRunTextEncoderEngineSmoke(modelDir.absolutePath, dispatchLibDir)
+        Log.i(TAG, "NATIVE_TEXT_ENCODER_ENGINE_SMOKE: $result")
+    }
+
+    fun runEndToEndSdxlNpuGenerationTest(context: Context) {
+        try {
+            System.loadLibrary("pockettavern_diffusion")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "=== E2E SDXL NPU test: FAILED to load pockettavern_diffusion ===", e)
+            return
+        }
+        val modelPath = File(context.filesDir, "sd-models/pureTukanoNSFW-xl")
+        val npuPath = File(context.filesDir, "npu-unet/pureTukanoNSFW-xl")
+        val dispatchLibDir = context.applicationInfo.nativeLibraryDir
+        Log.i(TAG, "=== E2E SDXL NPU test starting (modelPath=$modelPath npuPath=$npuPath) ===")
+
+        val handle = com.pockettavern.app.data.local.inference.MnnDiffusionBridge.nativeCreate(
+            modelPath.absolutePath,
+            4, // STABLE_DIFFUSION_XL
+            2, // MEMORY_MODE_FAST
+            npuPath.absolutePath,
+            dispatchLibDir
+        )
+        if (handle == 0L) {
+            Log.e(TAG, "E2E SDXL NPU test: nativeCreate returned 0")
+            return
+        }
+        if (!com.pockettavern.app.data.local.inference.MnnDiffusionBridge.nativeLoad(handle)) {
+            Log.e(TAG, "E2E SDXL NPU test: nativeLoad failed")
+            com.pockettavern.app.data.local.inference.MnnDiffusionBridge.nativeDestroy(handle)
+            return
+        }
+        Log.i(TAG, "E2E SDXL NPU test: nativeLoad succeeded!")
+
+        val outFile = File(context.filesDir, "test_npu_sdxl_out.png")
+        if (outFile.exists()) outFile.delete()
+
+        val ok = com.pockettavern.app.data.local.inference.MnnDiffusionBridge.nativeGenerateXL(
+            handle,
+            prompt = "a serene zen garden with blooming cherry blossom trees, photorealistic",
+            negativePrompt = "blurry, low quality",
+            outputPath = outFile.absolutePath,
+            width = 1024,
+            height = 1024,
+            steps = 1,
+            seed = 42,
+            cfgScale = 5.0f,
+            progressCallback = { pct -> Log.i(TAG, "E2E SDXL NPU Progress: $pct%") }
+        )
+        com.pockettavern.app.data.local.inference.MnnDiffusionBridge.nativeDestroy(handle)
+        Log.i(TAG, "E2E_SDXL_NPU_RESULT: ok=$ok outFileExists=${outFile.exists()} size=${outFile.length()}")
+    }
+
     // THROWAWAY: validates the batch=2 (real CFG) piece set -- see jni_diffusion.cpp's
     // Java_..._nativeRunUnetEngineBatch2Smoke doc comment for what this actually checks.
     private external fun nativeRunUnetEngineBatch2Smoke(modelDir: String, dispatchLibDir: String): String
@@ -1814,6 +1883,270 @@ object NpuDiagnostic {
             )
         } catch (e: Throwable) {
             Log.e(TAG, "=== full UNet separate-instances run: FAILED ===", e)
+        }
+    }
+
+    // Reads a raw little-endian float32 binary (no header -- produced on the desktop via
+    // numpy's ndarray.tofile(), NOT .npy, which has a variable-length header this doesn't skip).
+    private fun readFloatBin(file: File): FloatArray {
+        val bytes = file.readBytes()
+        val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val out = FloatArray(bytes.size / 4)
+        buf.asFloatBuffer().get(out)
+        return out
+    }
+
+    /**
+     * THROWAWAY one-off: does the FLUX.2 [klein] single_blocks.0 AOT-compiled-for-Tensor-G5
+     * artifact (~/code/litert-torch/scratch/models/flux2_klein_probe/single0_full_realtoks_noflags_aot/
+     * single0_full_realtoks_Google_Tensor_G5.tflite -- 87/87 ops, 1 NPU partition, compiled WITHOUT
+     * google_tensor_enable_large_model_support/google_tensor_sharding_intensity, see
+     * docs/flux2-klein-conversion.md) actually run on real Tensor G5 hardware at the real 1024px
+     * production token count (4608 = 512 text + 4096 image tokens), and does its output match the
+     * PyTorch reference (already confirmed correct on desktop CPU/XNNPACK, maxAbsDiff=0.000626 vs
+     * meanAbsRef=6.029 -- see scratch/compute_klein_single0_torch_reference.py /
+     * scratch/run_klein_single0_tflite_and_compare.py)?
+     *
+     * Expects these raw float32 .bin files (numpy .tofile(), not .npy) pushed to
+     * context.filesDir/klein_single0/: x.bin, pe.bin, mod_shift.bin, mod_scale.bin, mod_gate.bin,
+     * torch_out.bin -- plus the AOT .tflite itself at
+     * context.filesDir/klein_single0/single0_full_realtoks_Google_Tensor_G5.tflite.
+     *
+     * Buffer lifecycle fix vs. prior run: outputs are read before model.close(), and input/output
+     * TensorBuffers are explicitly closed in the correct order (inputs, then outputs, then model)
+     * after the read is complete. The prior run called model.close() before outputs.forEach
+     * { it.close() } was ever invoked, which is the Kotlin-side analogue of the C++ destruction-
+     * order bug that caused the SDXL batch=2 crash (see docs/npu-unet-conversion.md). Whether
+     * this matters for the Kotlin LiteRT API is unknown, but it was never done correctly before
+     * and is the lowest-risk change to try first.
+     */
+    fun runKleinSingle0(context: Context) {
+        val dir = File(context.filesDir, "klein_single0")
+        val modelFile = File(dir, "single0_full_realtoks_Google_Tensor_G5.tflite")
+        val inputNames = listOf("x", "pe", "mod_shift", "mod_scale", "mod_gate")
+        val inputFiles = inputNames.map { File(dir, "$it.bin") }
+        val refFile = File(dir, "torch_out.bin")
+        if (!modelFile.exists() || inputFiles.any { !it.exists() } || !refFile.exists()) {
+            Log.w(TAG, "klein_single0 model/input/reference files not all found in $dir, skipping")
+            return
+        }
+
+        Log.i(TAG, "=== Klein single_blocks.0 NPU diagnostic starting (real 1024px token shape) ===")
+        try {
+            val npuProvider = BuiltinNpuAcceleratorProvider(context)
+            val env = Environment.create(context, npuProvider)
+            val options = CompiledModel.Options(Accelerator.NPU)
+
+            val model = CompiledModel.create(modelFile.absolutePath, options, env)
+            val inputs = model.createInputBuffers()
+            val outputs = model.createOutputBuffers()
+            inputFiles.forEachIndexed { i, f -> inputs[i].writeFloat(readFloatBin(f)) }
+
+            val start = System.currentTimeMillis()
+            model.run(inputs, outputs)
+            val elapsedMs = System.currentTimeMillis() - start
+
+            // Read all outputs BEFORE closing anything. Then close in order: inputs, outputs,
+            // model -- so the backing dmabuf is not unmapped while we are still reading from it.
+            val npuOut = outputs[0].readFloat()
+            inputs.forEach { it.close() }
+            outputs.forEach { it.close() }
+            model.close()
+
+            val refOut = readFloatBin(refFile)
+            if (npuOut.size != refOut.size) {
+                Log.e(TAG, "KLEIN_SINGLE0: size mismatch npuOut=${npuOut.size} refOut=${refOut.size}")
+                return
+            }
+            var maxAbsDiff = 0f
+            var sumAbsDiff = 0.0
+            var sumAbsRef = 0.0
+            var hasNanOrInf = false
+            for (i in npuOut.indices) {
+                val v = npuOut[i]
+                if (v.isNaN() || v.isInfinite()) hasNanOrInf = true
+                val diff = kotlin.math.abs(v - refOut[i])
+                if (diff > maxAbsDiff) maxAbsDiff = diff
+                sumAbsDiff += diff
+                sumAbsRef += kotlin.math.abs(refOut[i])
+            }
+            val meanAbsDiff = sumAbsDiff / npuOut.size
+            val meanAbsRef = sumAbsRef / npuOut.size
+            Log.i(
+                TAG,
+                "KLEIN_SINGLE0: runMs=$elapsedMs hasNanOrInf=$hasNanOrInf " +
+                    "maxAbsDiff=$maxAbsDiff meanAbsDiff=$meanAbsDiff meanAbsRef=$meanAbsRef " +
+                    "npuOut[0..4]=${npuOut.take(5)} ref[0..4]=${refOut.take(5)}",
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "=== Klein single_blocks.0 NPU diagnostic: FAILED ===", e)
+        }
+    }
+
+    /**
+     * THROWAWAY one-off: same question as [runKleinSingle0] but using the smaller probe-shape
+     * artifact compiled at 80 tokens (16 text + 64 image) --
+     * single0_noflags_aot/single0_Google_Tensor_G5.tflite (also 87/87 ops, 1 NPU partition,
+     * compiled at the same time as the real-shape artifact).
+     *
+     * Motivation (docs/flux2-klein-conversion.md step 6): isolate whether the real-shape firmware
+     * fault is token-count/buffer-size dependent. The DIVE's mcause=0xb (RISC-V STORE_ACCESS_FAULT)
+     * could mean the firmware tried to write to a DMA buffer address that falls outside the range
+     * the DIVE's MMU will accept. At 4608 tokens the largest intermediate activation is the
+     * linear1 pre-attention output: 4608 × 9216 × 4 bytes ≈ 170 MB -- at 80 tokens it's only
+     * ~3 MB. If the 80-token artifact runs clean while the 4608-token one crashes, buffer-range
+     * is a real variable. If it crashes too, size is not the variable and the investigation should
+     * look elsewhere (specific op patterns, alignment, dispatch payload structure, etc).
+     *
+     * Uses synthetic sine-wave inputs (no I/O files needed) since we have no saved PyTorch
+     * reference at the 80-token shape. Only checks: does it run without crashing the NPU, and
+     * is the output finite and non-zero?
+     *
+     * Expects: context.filesDir/klein_single0/single0_Google_Tensor_G5.tflite
+     */
+    fun runKleinSingle0SmallShape(context: Context) {
+        val dir = File(context.filesDir, "klein_single0")
+        val modelFile = File(dir, "single0_Google_Tensor_G5.tflite")
+        if (!modelFile.exists()) {
+            Log.w(TAG, "klein_single0/single0_Google_Tensor_G5.tflite not found in $dir, skipping")
+            return
+        }
+
+        // 80-token probe shape: 16 text + 64 image tokens (flux2_klein_probe.py defaults).
+        // x: [1, 80, 3072], pe: [1, 1, 80, 64, 2, 2], mod_*: [1, 1, 3072].
+        val tokenCount = 80
+        val hiddenSize = 3072
+        val ropeComplexPairs = 64 // head_dim=128 -> 64 complex pairs per the RoPE convention
+
+        Log.i(TAG, "=== Klein single_blocks.0 small-shape (80-token) NPU diagnostic starting ===")
+        try {
+            val npuProvider = BuiltinNpuAcceleratorProvider(context)
+            val env = Environment.create(context, npuProvider)
+            val options = CompiledModel.Options(Accelerator.NPU)
+
+            val model = CompiledModel.create(modelFile.absolutePath, options, env)
+            val inputs = model.createInputBuffers()
+            val outputs = model.createOutputBuffers()
+
+            // x: [1, tokenCount, hiddenSize]
+            inputs[0].writeFloat(FloatArray(1 * tokenCount * hiddenSize) { i -> kotlin.math.sin(i.toFloat()) * 0.1f })
+            // pe: [1, 1, tokenCount, ropeComplexPairs, 2, 2]
+            inputs[1].writeFloat(FloatArray(1 * 1 * tokenCount * ropeComplexPairs * 2 * 2) { i -> kotlin.math.sin(i.toFloat()) * 0.1f })
+            // mod_shift, mod_scale, mod_gate: each [1, 1, hiddenSize]
+            for (k in 2..4) {
+                inputs[k].writeFloat(FloatArray(1 * 1 * hiddenSize) { i -> kotlin.math.sin(i.toFloat()) * 0.1f })
+            }
+
+            val start = System.currentTimeMillis()
+            model.run(inputs, outputs)
+            val elapsedMs = System.currentTimeMillis() - start
+
+            // Same lifecycle discipline as runKleinSingle0: read before closing.
+            val npuOut = outputs[0].readFloat()
+            inputs.forEach { it.close() }
+            outputs.forEach { it.close() }
+            model.close()
+
+            var hasNanOrInf = false
+            var maxAbs = 0f
+            var allZero = true
+            for (v in npuOut) {
+                if (v.isNaN() || v.isInfinite()) hasNanOrInf = true
+                val a = kotlin.math.abs(v)
+                if (a > maxAbs) maxAbs = a
+                if (a > 1e-9f) allZero = false
+            }
+            Log.i(
+                TAG,
+                "KLEIN_SINGLE0_SMALL: runMs=$elapsedMs hasNanOrInf=$hasNanOrInf " +
+                    "maxAbs=$maxAbs allZero=$allZero outputSize=${npuOut.size} " +
+                    "npuOut[0..4]=${npuOut.take(5)}",
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "=== Klein single_blocks.0 small-shape NPU diagnostic: FAILED ===", e)
+        }
+    }
+
+    /**
+     * THROWAWAY generalized token-count probe: runs any AOT-compiled Klein single-stream block
+     * artifact with synthetic sin-wave inputs at a specified token count, without needing any
+     * reference .bin files on-device. Used for the binary-search of the Darwinn DMA address-range
+     * ceiling (DIVE mcause=0xb STORE_ACCESS_FAULT at 4608 tokens, clean at 80 tokens).
+     *
+     * Invoked via intent extras (all required):
+     *   - "klein_token_probe_file"   : filename (not full path) of the .tflite inside
+     *                                  context.filesDir/klein_single0/
+     *   - "klein_token_probe_tokens" : total token count (text + image) to use for synthetic inputs
+     *
+     * Example adb command for 512 tokens:
+     *   adb shell am force-stop com.pockettavern.app
+     *   adb shell am start -n com.pockettavern.app/.MainActivity \
+     *       --ez run_klein_token_probe true \
+     *       --es klein_token_probe_file single0_full_T512tok_Google_Tensor_G5.tflite \
+     *       --ei klein_token_probe_tokens 512
+     *
+     * Checks: does it crash the NPU, and is the output finite/non-zero?
+     * Logs as: KLEIN_TOKEN_PROBE[<tokenCount>]: runMs=... hasNanOrInf=... allZero=... ...
+     */
+    fun runKleinTokenProbe(context: Context, fileName: String, tokenCount: Int) {
+        val dir = File(context.filesDir, "klein_single0")
+        val modelFile = File(dir, fileName)
+        if (!modelFile.exists()) {
+            Log.w(TAG, "klein_token_probe: $modelFile not found, skipping")
+            return
+        }
+
+        val hiddenSize = 3072
+        val ropeComplexPairs = 64 // head_dim=128 -> 64 complex pairs
+
+        Log.i(TAG, "=== Klein token probe: file=$fileName tokens=$tokenCount ===")
+        try {
+            val npuProvider = BuiltinNpuAcceleratorProvider(context)
+            val env = Environment.create(context, npuProvider)
+            val options = CompiledModel.Options(Accelerator.NPU)
+
+            val model = CompiledModel.create(modelFile.absolutePath, options, env)
+            val inputs = model.createInputBuffers()
+            val outputs = model.createOutputBuffers()
+
+            // x: [1, tokenCount, hiddenSize]
+            inputs[0].writeFloat(FloatArray(1 * tokenCount * hiddenSize) { i -> kotlin.math.sin(i.toFloat()) * 0.1f })
+            // pe: [1, 1, tokenCount, ropeComplexPairs, 2, 2]
+            inputs[1].writeFloat(FloatArray(1 * 1 * tokenCount * ropeComplexPairs * 2 * 2) { i -> kotlin.math.sin(i.toFloat()) * 0.1f })
+            // mod_shift, mod_scale, mod_gate: each [1, 1, hiddenSize]
+            for (k in 2..4) {
+                inputs[k].writeFloat(FloatArray(1 * 1 * hiddenSize) { i -> kotlin.math.sin(i.toFloat()) * 0.1f })
+            }
+
+            val start = System.currentTimeMillis()
+            model.run(inputs, outputs)
+            val elapsedMs = System.currentTimeMillis() - start
+
+            val npuOut = outputs[0].readFloat()
+            inputs.forEach { it.close() }
+            outputs.forEach { it.close() }
+            model.close()
+
+            var hasNanOrInf = false
+            var maxAbs = 0f
+            var allZero = true
+            for (v in npuOut) {
+                if (v.isNaN() || v.isInfinite()) hasNanOrInf = true
+                val a = kotlin.math.abs(v)
+                if (a > maxAbs) maxAbs = a
+                if (a > 1e-9f) allZero = false
+            }
+            // linear1 output size (largest intermediate) as reference for the DMA limit search
+            val linear1MiB = tokenCount.toLong() * 9216L * 4L / (1024L * 1024L)
+            Log.i(
+                TAG,
+                "KLEIN_TOKEN_PROBE[$tokenCount]: runMs=$elapsedMs hasNanOrInf=$hasNanOrInf " +
+                    "maxAbs=$maxAbs allZero=$allZero outputSize=${npuOut.size} " +
+                    "linear1_intermediate_MiB=$linear1MiB " +
+                    "npuOut[0..4]=${npuOut.take(5)}",
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "=== Klein token probe ($fileName tokens=$tokenCount): FAILED ===", e)
         }
     }
 }
