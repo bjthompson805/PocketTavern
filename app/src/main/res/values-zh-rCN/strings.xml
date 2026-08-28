@@ -169,6 +169,9 @@
     <string name="provider">Provider</string>
     <string name="system_tts">System TTS</string>
     <string name="openai_compatible">OpenAI-Compatible</string>
+    <string name="pocket_tts">Pocket TTS</string>
+    <string name="pocket_tts_api">Pocket TTS（端侧设备）</string>
+    <string name="pocket_tts_description">在手机端离线本地运行语音合成，支持音色克隆</string>
     <string name="system_tts_engine">System TTS Engine</string>
     <string name="choose_which_installed_tts_engine_to_use">Choose which installed TTS engine to use</string>
     <string name="openai_compatible_api">OpenAI-Compatible API</string>

@@ -208,6 +208,9 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:2.2.0")
     implementation("com.google.ai.edge.litert:litert-api:2.2.0")
 
+    // On-device TTS inference via ONNX Runtime
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+
     // DataStore
     implementation(libs.androidx.datastore.preferences)
 
