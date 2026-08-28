@@ -48,7 +48,7 @@ object NpuDiagnostic {
             Log.e(TAG, "=== native UnetEngine smoke test: FAILED to load pockettavern_diffusion ===", e)
             return
         }
-        val modelDir = File(context.filesDir, "unet_wrapped")
+        val modelDir = File(context.filesDir, "npu-unet/pureTukanoNSFW-xl")
         if (!modelDir.exists()) {
             Log.w(TAG, "$modelDir not found, skipping native UnetEngine smoke test")
             return
@@ -57,6 +57,88 @@ object NpuDiagnostic {
         Log.i(TAG, "=== native UnetEngine smoke test starting (modelDir=$modelDir dispatchLibDir=$dispatchLibDir) ===")
         val result = nativeRunUnetEngineSmoke(modelDir.absolutePath, dispatchLibDir)
         Log.i(TAG, "NATIVE_UNET_ENGINE_SMOKE: $result")
+    }
+
+    // THROWAWAY: validates the batch=2 (real CFG) piece set -- see jni_diffusion.cpp's
+    // Java_..._nativeRunUnetEngineBatch2Smoke doc comment for what this actually checks.
+    private external fun nativeRunUnetEngineBatch2Smoke(modelDir: String, dispatchLibDir: String): String
+
+    fun runNativeUnetEngineBatch2Smoke(context: Context) {
+        try {
+            System.loadLibrary("pockettavern_diffusion")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "=== native UnetEngine batch=2 smoke test: FAILED to load pockettavern_diffusion ===", e)
+            return
+        }
+        val modelDir = File(context.filesDir, "npu-unet-b2-test")
+        if (!modelDir.exists()) {
+            Log.w(TAG, "$modelDir not found, skipping native UnetEngine batch=2 smoke test")
+            return
+        }
+        val dispatchLibDir = context.applicationInfo.nativeLibraryDir
+        Log.i(TAG, "=== native UnetEngine batch=2 smoke test starting (modelDir=$modelDir dispatchLibDir=$dispatchLibDir) ===")
+        val result = nativeRunUnetEngineBatch2Smoke(modelDir.absolutePath, dispatchLibDir)
+        Log.i(TAG, "NATIVE_UNET_ENGINE_BATCH2_SMOKE: $result")
+    }
+
+    // THROWAWAY: measures whether two independent batch-1 NPU forwards overlap when started
+    // concurrently. This is the only potentially practical CFG alternative to the much slower
+    // batch-2 Tensor G5 kernels.
+    private external fun nativeRunTwoBatch1EnginesInParallel(modelDir: String, dispatchLibDir: String): String
+
+    fun runTwoBatch1EnginesInParallel(context: Context) {
+        try {
+            System.loadLibrary("pockettavern_diffusion")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "=== parallel batch-1 smoke test: FAILED to load pockettavern_diffusion ===", e)
+            return
+        }
+        val modelDir = File(context.filesDir, "npu-unet/pureTukanoNSFW-xl")
+        if (!modelDir.exists()) {
+            Log.w(TAG, "$modelDir not found, skipping parallel batch-1 smoke test")
+            return
+        }
+        val result = nativeRunTwoBatch1EnginesInParallel(
+            modelDir.absolutePath,
+            context.applicationInfo.nativeLibraryDir,
+        )
+        Log.i(TAG, "NATIVE_UNET_ENGINE_PARALLEL_BATCH1_SMOKE: $result")
+    }
+
+    private external fun nativeRunParallelBatch1FileStep(
+        modelDir: String,
+        dispatchLibDir: String,
+        inputDir: String,
+        outputFile: String,
+    ): String
+
+    /**
+     * Debug-only one-step entry point for the desktop parallel-CFG driver. Its input directory
+     * contains `uncond_*.bin` and `cond_*.bin` tensors; native C++ runs the two batch-1 forwards
+     * concurrently and writes their concatenated outputs. The desktop caller applies CFG and the
+     * scheduler, so this is a real image-generation path rather than synthetic test data.
+     */
+    fun runParallelBatch1FileStep(context: Context) {
+        try {
+            System.loadLibrary("pockettavern_diffusion")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "=== parallel batch-1 file step: FAILED to load pockettavern_diffusion ===", e)
+            return
+        }
+        val inputDir = File(context.filesDir, "unet_step_in")
+        val outputFile = File(context.filesDir, "unet_step_out.bin")
+        val modelDir = File(context.filesDir, "npu-unet/pureTukanoNSFW-xl")
+        if (!inputDir.isDirectory || !modelDir.isDirectory) {
+            Log.w(TAG, "parallel batch-1 file step inputs or model bundle missing, skipping")
+            return
+        }
+        val result = nativeRunParallelBatch1FileStep(
+            modelDir.absolutePath,
+            context.applicationInfo.nativeLibraryDir,
+            inputDir.absolutePath,
+            outputFile.absolutePath,
+        )
+        Log.i(TAG, "PARALLEL_BATCH1_FILE_STEP: $result")
     }
 
     private fun currentRssKb(): Long {
@@ -1426,12 +1508,14 @@ object NpuDiagnostic {
      * real invocations can tell us whether it's actually fixed.
      */
     fun runFullUnetSeparateStep(context: Context) {
-        val dir = File(context.filesDir, "unet_wrapped")
+        // The current per-model production bundle location. This diagnostic deliberately uses
+        // the same batch-1 AOT pieces as the shipped conditional-only NPU path.
+        val dir = File(context.filesDir, "npu-unet/pureTukanoNSFW-xl")
         val inDir = File(context.filesDir, "unet_step_in")
         val outFile = File(context.filesDir, "unet_step_out.bin")
         val missing = UNET_PIECES.filter { !File(dir, it.fileName).exists() }
         if (missing.isNotEmpty() || !inDir.exists()) {
-            Log.w(TAG, "unet_wrapped/ (missing ${missing.size}) or unet_step_in/ not found, skipping")
+            Log.w(TAG, "npu-unet/pureTukanoNSFW-xl/ (missing ${missing.size}) or unet_step_in/ not found, skipping")
             return
         }
         Log.i(TAG, "=== full UNet single-step, separate-instances (from files) starting ===")

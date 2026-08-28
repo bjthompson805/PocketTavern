@@ -93,8 +93,7 @@ class MnnDiffusionEngine @Inject constructor(
         }
         if (npuUnetModelPath.isNotEmpty()) {
             DebugLogger.log(
-                "MnnDiffusionEngine: using batch-1 conditional-only LiteRT NPU UNet " +
-                    "(negative prompt and CFG scale are intentionally ignored)"
+                "MnnDiffusionEngine: using two parallel batch-1 LiteRT NPU UNet engines with CFG"
             )
         }
         val newHandle = MnnDiffusionBridge.nativeCreate(

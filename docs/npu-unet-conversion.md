@@ -1,15 +1,30 @@
 # SDXL UNet on Tensor G5 NPU — handoff notes
 
-**Status as of 2026-08-27 (updated same day, later pass)**: The core architecture is proven correct
-and the memory problem that motivated this whole effort is solved. The apparent native C++
-performance regression was Doze throttling, not a C++ regression. The 36-piece NPU UNet is wired
-into PocketTavern's real SDXL path and confirmed working end-to-end on-device, including a real
-persona-avatar generation triggered through the actual app UI (not a diagnostic harness). NPU
+**Status as of 2026-08-27 (updated same day, latest pass)**: The core architecture is proven
+correct and the memory problem that motivated this whole effort is solved. The apparent native
+C++ performance regression was Doze throttling, not a C++ regression. The 36-piece NPU UNet is
+wired into PocketTavern's real SDXL path and confirmed working end-to-end on-device, including a
+real persona-avatar generation triggered through the actual app UI (not a diagnostic harness). NPU
 support is no longer hardcoded to one model: `SdxlModelManager` now has a generic
 `npu-unet/<modelId>/` bundle convention (parallel to `sd-models/<modelId>/`), and there's a real
-"Run on" AUTO/CPU/NPU control in Settings -> Image Generation, gating `MnnDiffusionEngine`'s NPU
-path via a new `ImageGenConfig.sdxlRunMode` field. Confirmed live on-device (NPU badge shows
-correctly, mode selection persists, generation succeeds with NPU selected).
+per-model "Run on" AUTO/CPU/NPU control in Settings -> Image Generation, gating
+`MnnDiffusionEngine`'s NPU path via `ImageGenConfig.sdxlRunModeByModel`. Confirmed live on-device
+(NPU badge shows correctly, mode selection persists per model, generation succeeds with NPU
+selected).
+
+**Real CFG (batch=2) is reliable but not performance-viable.** The epoll crash was caused by
+our C++ destruction order, not an unfixable Google Tensor runtime issue: `TensorBuffer`s were
+being destroyed before their `CompiledModel`, allowing a stale dispatcher epoll event to collide
+with a reused fd in the next piece. `NpuUnetEngine::RunPiece()` now destroys the `CompiledModel`
+before its buffers, with the same order guaranteed on error returns. With no inter-piece sleep,
+two complete 36-piece batch-2 forwards in one `LiteRtEnvironment` completed correctly on the
+Pixel 10 Pro XL (114.1s total; duplicated batch rows were exactly equal). However, one batch-2
+forward takes about 61–64s, making a 20-step image roughly 20 minutes. Do not wire it into the app.
+The app now uses the materially faster strategy: two independent **batch-1** engines, one for
+the unconditional CFG row and one for the conditional row, run concurrently for each step. The
+native bridge combines their outputs with normal CFG before the scheduler update. A real
+desktop-driven 20-step image using this exact pair-of-engines design produced substantially
+better output than the former conditional-only path; one on-device forward completed in 32.610s.
 
 This doc is the handoff summary for continuing this work in a fresh agent/session (originally
 built with Claude Code; being handed to Codex). It supersedes any older content that was here
@@ -49,8 +64,8 @@ Google's gated Tensor AOT compiler SDK + the public LiteRT runtime.
    displayed float precision**.
 6. **Wired into the real SDXL path**: `MnnDiffusionBridge.nativeCreate()` optionally configures
    `StableDiffusionXL`, whose `load()` uses LiteRT for the UNet and keeps MNN for text encoders,
-   scheduler and VAE. `MnnDiffusionEngine` enables it only for the matching
-   `pureTukanoNSFW-xl` MNN model, preventing a silent mix of incompatible checkpoint weights.
+   scheduler and VAE. `MnnDiffusionEngine` keys an NPU bundle to the matching MNN model ID,
+   preventing a silent mix of incompatible checkpoint weights.
 
 ## Performance re-check (2026-08-27): Android Doze caused the apparent C++ regression
 
@@ -122,6 +137,59 @@ wrappers and is not a removable delegate candidate.
   class called directly from `unet()`, not going through MNN's Module/graph system at all) is
   simpler and was chosen instead — no FlatBuffer schema changes, no `PipelineModule.cpp` edits.
 
+## Real CFG (batch=2): fd lifetime ordering fix
+
+Everything on the conversion/compile side of batch=2 CFG works: all 36 pieces convert and
+AOT-compile at batch=2 with 100% NPU offload, zero failures (see
+`~/code/litert-torch/scratch/build_batch2_all.sh`, `.summary`). `NpuUnetEngine::Load()` and
+`StableDiffusionXL::configureNpuUnet()` both take a `batch` parameter (default 1, fully
+backward-compatible with the shipped batch=1 path); `unet()`'s NPU branch builds a real stacked
+[uncond, cond] input and applies the CFG formula on a real batch=2 output when `batch()==2`.
+
+The initial native batch-2 run aborted inside the dispatcher:
+
+```
+F0000 ... :833] Check failed: pending_sink_fds.erase(fd) > 0 (0 vs. 0) Unexpected fd from epoll: 0
+Fatal signal 6 (SIGABRT) ... Thread-5
+```
+
+The apparently timing-sensitive workaround was a 50ms sleep after each piece teardown. It let the
+chain complete, but added 1.8 seconds per forward and was not a correctness guarantee. The actual
+problem was visible in `RunPiece()`'s local declaration order: `cm_holder` was declared before
+the input/output `TensorBufferHolder` vectors, so ordinary reverse-order C++ destruction closed
+the buffers' fds before `LiteRtDestroyCompiledModel()` could unregister its epoll state.
+
+The fix declares the buffer owners before `cm_holder` (making this order safe for every early
+return too) and explicitly destroys the successful piece's compiled model while all buffers are
+still alive. No sleep is used. This preserves the separate-piece memory bound; it changes only
+teardown ordering.
+
+On 2026-08-27, `nativeRunUnetEngineBatch2Smoke` ran two consecutive full 36-piece forwards in a
+single engine/environment with no delay and completed in 114,079ms. The result had 131,072 floats,
+no NaN/Inf, and `maxRowDiff=0` for identical inputs in the two CFG rows. A prior one-forward run
+also completed in 59,732ms. This validates the dispatcher lifetime pattern required by successive
+denoising steps, but it is not yet a real prompt/image CFG validation.
+
+### Performance result: do not use batch 2 for CFG
+
+The fixed batch-2 execution is still about 61–64s per UNet forward while the device is awake. The
+dominant cost is NPU execution, not model loading, buffer copies, or fd teardown: each of the five
+large spatial-attention pieces takes about 6.7–7.3s on the batch-2 AOT binaries. This makes the
+batch-2 design slower than the CPU path for a 20-step image.
+
+Two independent batch-1 engines can be launched concurrently, one for the unconditional row and
+one for the conditional row. Four same-environment passes completed in 31,241ms, 29,562ms,
+28,914ms, and 27,879ms. A real one-step desktop-driven CFG pass took 32.610s and the full
+20-step output was visually confirmed to be substantially better than conditional-only output.
+This is now the production NPU CFG strategy. It is slower than the old ~19s single-row NPU
+benchmark, but still materially faster than the ~50-52s CPU UNet step while retaining quality.
+
+Batch 2 does **not** receive a comparable later-step speedup: three consecutive same-environment
+passes took 63,583ms, 61,074ms, and 62,153ms. The device was awake and Android reported
+`Thermal Status: 0` throughout. Vendor skin sensors reached a mild warning level during the long
+run, but there was no Android thermal throttle and the timing stayed flat rather than improving.
+Thus neither AOT compilation nor normal warm-up explains the batch-2 slowdown.
+
 ## What's done (this pass, 2026-08-27)
 
 - Multi-step real PocketTavern NPU generation, triggered through the actual app UI (persona
@@ -131,6 +199,13 @@ wrappers and is not a removable delegate candidate.
 - **NPU support generalized beyond the one hardcoded `pureTukanoNSFW-xl` check** (former item #5
   below) and a real run-mode toggle now exists (former item #1 not yet done, but this
   supersedes it): see "Generic NPU bundle support + run-mode toggle" below.
+- **Batch-2 fd lifecycle fixed**: `CompiledModel` is now destroyed before every one of its tensor
+  buffers, replacing the 50ms inter-piece sleep. The two-forward on-device batch-2 smoke test
+  completed without an epoll error.
+- **Production NPU CFG**: `StableDiffusionXL` now loads two independent batch-1
+  `NpuUnetEngine`s, sends the unconditional and conditional rows to them concurrently at every
+  denoising step, and applies `uncond + cfgScale * (cond - uncond)` before scheduling. The UI no
+  longer claims that NPU ignores the negative prompt or CFG scale.
 
 ## What's NOT done yet (in priority order)
 
@@ -140,14 +215,11 @@ wrappers and is not a removable delegate candidate.
    scratch (int8-attention-style blockers are not guaranteed to be the only ones). Not started;
    no design work done yet on what these pieces' op graphs look like or whether the same
    RESHAPE-wrap/separate-instances architecture will even be needed (may depend on op count).
-2. **Real CFG (batch=2) without a 2x latency penalty.** Every converted piece is batch=1 today;
-   `StableDiffusionXL::unet()` takes the conditional row only and makes exactly one NPU forward
-   per step. The two options: (a) re-convert all 36 pieces at batch=2 — risks reopening the AOT
-   compiler's own memory ceiling that forced the 36-way split in the first place, unverified
-   whether the compiler even accepts it; (b) two sequential batch=1 `forward()` calls, combined
-   in the caller — correct and easy, but literally 2x the per-step latency, i.e. NOT "without
-   perf loss." Neither has been attempted. If (a) is explored, budget real AOT-compile-time
-   memory-ceiling risk, not just conversion-script effort.
+2. **Further CFG performance work.** The production pair-of-batch-1 strategy is about 28-33s per
+   step and is a quality-preserving win over CPU, but not as fast as the old 19s single-row
+   benchmark. A future attempt needs a graph/compiler strategy that improves the five large
+   spatial-attention kernels. Do not reintroduce a timing sleep: the lifetime fix above is the
+   required teardown behavior.
 3. **Model file distribution**: the 36 wrapped `.tflite` pieces (~5GB total) are currently only
    on the test device via manual `adb push` (see below) — there's no `SdxlModelManager`-style
    download flow for them (the *catalog/selection* side now exists generically, see below — only

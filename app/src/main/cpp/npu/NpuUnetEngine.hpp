@@ -41,15 +41,20 @@
 
 namespace pockettavern {
 
-// One external UNet input tensor. Order/shapes match StableDiffusionXL::unet()'s existing MNN
-// call site (sample/timestep/encoder_hidden_states/text_embeds/time_ids) -- see
-// stable_diffusion_xl.cpp's mModules[2]->onForward(...) call this replaces.
+// One external UNet input tensor. Order matches StableDiffusionXL::unet()'s existing MNN call
+// site (sample/timestep/encoder_hidden_states/text_embeds/time_ids) -- see
+// stable_diffusion_xl.cpp's mModules[2]->onForward(...) call this replaces. Shapes below are
+// per-row; every vector's actual size is batch * (per-row element count), batch matching
+// whatever was passed to Load() -- see that method's doc. For batch=2 (real CFG), sample/t_emb/
+// text_embeds/time_ids/encoder_hidden_states are literally the same batch=2 tensors
+// StableDiffusionXL::unet() already builds for the MNN path (uncond row then cond row); nothing
+// needs to be duplicated or sliced by hand the way the batch=1 conditional-only path does.
 struct NpuUnetInputs {
-  std::vector<float> sample;                 // [1,4,128,128]
-  std::vector<float> t_emb;                  // [1,320] -- diffusers' weight-free Timesteps(t), NOT a raw scalar timestep
-  std::vector<float> encoder_hidden_states;  // [1,77,2048]
-  std::vector<float> text_embeds;            // [1,1280]
-  std::vector<float> time_ids;               // [1,6]
+  std::vector<float> sample;                 // [*,4,128,128]
+  std::vector<float> t_emb;                  // [*,320] -- diffusers' weight-free Timesteps(t), NOT a raw scalar timestep
+  std::vector<float> encoder_hidden_states;  // [*,77,2048]
+  std::vector<float> text_embeds;            // [*,1280]
+  std::vector<float> time_ids;               // [*,6]
 };
 
 class NpuUnetEngine {
@@ -63,15 +68,20 @@ class NpuUnetEngine {
   // Creates the LiteRT environment and verifies all 36 wrapped piece files exist under
   // model_dir. dispatch_lib_dir is the directory containing libLiteRtDispatch_GoogleTensor.so
   // (on Android, the app's ApplicationInfo.nativeLibraryDir -- there's no way to derive this
-  // from C++ alone, must be passed down from the Kotlin/JNI caller). Safe to call at most once
-  // per instance (matches MnnDiffusionEngine's create-then-load-once pattern) -- returns false
-  // and logs via MNN_ERROR on any failure (missing files, environment creation failure), leaving
-  // the engine unusable (IsLoaded() stays false; forward() will fail without touching any NPU
-  // state). Does NOT run anything -- pieces are still created/closed per forward() call, not
-  // pre-warmed here.
-  bool Load(std::string model_dir, const std::string& dispatch_lib_dir);
+  // from C++ alone, must be passed down from the Kotlin/JNI caller). batch must match how
+  // model_dir's 36 pieces were actually AOT-compiled (1 = conditional-only, no CFG; 2 = real
+  // CFG, uncond+cond in one dispatch per piece) -- passing the wrong value doesn't fail Load()
+  // itself but produces wrong-sized buffers (and either a hard LiteRT error or silently wrong
+  // output) the first time forward() runs a piece. Safe to call at most once per instance
+  // (matches MnnDiffusionEngine's create-then-load-once pattern) -- returns false and logs via
+  // MNN_ERROR on any failure (missing files, environment creation failure), leaving the engine
+  // unusable (IsLoaded() stays false; forward() will fail without touching any NPU state). Does
+  // NOT run anything -- pieces are still created/closed per forward() call, not pre-warmed here.
+  bool Load(std::string model_dir, const std::string& dispatch_lib_dir, int batch = 1);
 
   bool IsLoaded() const { return env_ != nullptr; }
+
+  int batch() const { return batch_; }
 
   // Runs one real UNet forward pass (one diffusion step, batch=1 -- CFG batching, if used, is
   // the CALLER's responsibility: call forward() twice, once per conditioning, and combine the
@@ -102,6 +112,7 @@ class NpuUnetEngine {
 
   std::string model_dir_;
   LiteRtEnvironment env_ = nullptr;
+  int batch_ = 1;
 };
 
 }  // namespace pockettavern

@@ -93,6 +93,20 @@ const std::unordered_map<std::string, std::vector<int32_t>>& RoleShapes() {
   return kShapes;
 }
 
+// RoleShapes() holds per-row (batch=1) shapes; every real tensor's batch dimension (always
+// dim[0], by construction of every conversion script this pipeline uses) is (row shape) * batch.
+// batch=1 and batch=2 pieces are compiled from otherwise-identical topology (see
+// build_full_unet_wrapped.py), so scaling dim[0] here -- rather than keeping two separate
+// hardcoded shape tables -- is exact, not an approximation.
+bool ScaledRoleShape(const char* role, int batch, std::vector<int32_t>* out_shape) {
+  const auto& shapes = RoleShapes();
+  auto it = shapes.find(role);
+  if (it == shapes.end()) return false;
+  *out_shape = it->second;
+  if (!out_shape->empty()) (*out_shape)[0] *= batch;
+  return true;
+}
+
 size_t RoleElementCount(const std::vector<int32_t>& shape) {
   size_t n = 1;
   for (int32_t d : shape) n *= static_cast<size_t>(d);
@@ -197,11 +211,16 @@ NpuUnetEngine::~NpuUnetEngine() {
   }
 }
 
-bool NpuUnetEngine::Load(std::string model_dir, const std::string& dispatch_lib_dir) {
+bool NpuUnetEngine::Load(std::string model_dir, const std::string& dispatch_lib_dir, int batch) {
   if (env_ != nullptr) {
     NPU_LOGE("NpuUnetEngine::Load called twice on the same instance\n");
     return false;
   }
+  if (batch != 1 && batch != 2) {
+    NPU_LOGE("NpuUnetEngine::Load: unsupported batch=%d (only 1 or 2 have compiled pieces)\n", batch);
+    return false;
+  }
+  batch_ = batch;
   model_dir_ = std::move(model_dir);
 
   for (const auto& piece : Pieces()) {
@@ -238,7 +257,17 @@ bool NpuUnetEngine::RunPiece(const PieceSpec& piece,
         .count();
   };
   const std::string path = model_dir_ + "/" + piece.file_name;
-  const auto& shapes = RoleShapes();
+
+  // Declare buffer owners before the CompiledModel owner. C++ destroys local variables in reverse
+  // declaration order, so every return after cm_holder is created tears down the dispatcher's
+  // epoll state before it releases any TensorBuffer fd. The vectors are resized only after the
+  // compiled model has been created, but their earlier declaration defines the crucial lifetime
+  // order even on an error return.
+  std::vector<TensorBufferHolder> input_holders;
+  std::vector<LiteRtTensorBuffer> input_buffers;
+  std::vector<TensorBufferHolder> output_holders;
+  std::vector<LiteRtTensorBuffer> output_buffers;
+  std::vector<size_t> output_element_counts;
 
   ModelHolder model_holder;
   LiteRtStatus status = LiteRtCreateModelFromFile(env_, path.c_str(), &model_holder.model);
@@ -273,16 +302,15 @@ bool NpuUnetEngine::RunPiece(const PieceSpec& piece,
   const long long compile_ms = elapsed_ms();
 
   // Input buffers: allocate, write.
-  std::vector<TensorBufferHolder> input_holders(piece.input_roles.size());
-  std::vector<LiteRtTensorBuffer> input_buffers(piece.input_roles.size());
+  input_holders.resize(piece.input_roles.size());
+  input_buffers.resize(piece.input_roles.size());
   for (size_t i = 0; i < piece.input_roles.size(); ++i) {
     const char* role = piece.input_roles[i];
-    auto shape_it = shapes.find(role);
-    if (shape_it == shapes.end()) {
+    std::vector<int32_t> shape;
+    if (!ScaledRoleShape(role, batch_, &shape)) {
       NPU_LOGE("NpuUnetEngine: %s: no known shape for role '%s'\n", piece.name, role);
       return false;
     }
-    const std::vector<int32_t>& shape = shape_it->second;
     const size_t num_elements = RoleElementCount(shape);
     if (piece_inputs[i]->size() != num_elements) {
       NPU_LOGE("NpuUnetEngine: %s: role '%s' expected %zu elements, got %zu\n", piece.name, role,
@@ -329,17 +357,16 @@ bool NpuUnetEngine::RunPiece(const PieceSpec& piece,
   const long long inputs_ms = elapsed_ms();
 
   // Output buffers: allocate only (written by the run).
-  std::vector<TensorBufferHolder> output_holders(piece.output_roles.size());
-  std::vector<LiteRtTensorBuffer> output_buffers(piece.output_roles.size());
-  std::vector<size_t> output_element_counts(piece.output_roles.size());
+  output_holders.resize(piece.output_roles.size());
+  output_buffers.resize(piece.output_roles.size());
+  output_element_counts.resize(piece.output_roles.size());
   for (size_t i = 0; i < piece.output_roles.size(); ++i) {
     const char* role = piece.output_roles[i];
-    auto shape_it = shapes.find(role);
-    if (shape_it == shapes.end()) {
+    std::vector<int32_t> shape;
+    if (!ScaledRoleShape(role, batch_, &shape)) {
       NPU_LOGE("NpuUnetEngine: %s: no known shape for role '%s'\n", piece.name, role);
       return false;
     }
-    const std::vector<int32_t>& shape = shape_it->second;
     const size_t num_elements = RoleElementCount(shape);
     output_element_counts[i] = num_elements;
 
@@ -390,6 +417,18 @@ bool NpuUnetEngine::RunPiece(const PieceSpec& piece,
   NPU_LOGE("NpuUnetEngine: phases %s: model=%lldms compile=%lldms inputs=%lldms outputs=%lldms run=%lldms read=%lldms\n",
            piece.name, model_ms, compile_ms - model_ms, inputs_ms - compile_ms,
            outputs_ms - inputs_ms, run_ms - outputs_ms, elapsed_ms() - run_ms);
+
+  // A CompiledModel owns the dispatcher's epoll registrations for this invocation.  It must be
+  // torn down *before* its TensorBuffers: otherwise a TensorBuffer destructor can close an fd
+  // that the dispatcher still has registered, and a subsequent model can reuse that fd number
+  // before the stale epoll event is drained.  In the original all-RAII ordering the vectors of
+  // TensorBufferHolder were declared after cm_holder, so they were destroyed first on return.
+  // That ordering was masked at batch=1 but reproducibly tripped the Google Tensor dispatcher at
+  // batch=2.  Destroy the compiled model explicitly while every buffer is still alive; the holder
+  // is nulled so its destructor remains a no-op.  This is synchronization by ownership, not a
+  // timing delay, and preserves the one-piece peak-memory bound.
+  LiteRtDestroyCompiledModel(cm_holder.compiled_model);
+  cm_holder.compiled_model = nullptr;
 
   return true;
   // ModelHolder/OptionsHolder/CompiledModelHolder/TensorBufferHolder destructors release every
@@ -454,6 +493,7 @@ bool NpuUnetEngine::forward(const NpuUnetInputs& inputs, std::vector<float>* out
     for (size_t j = 0; j < piece.output_roles.size(); ++j) {
       role_map[piece.output_roles[j]] = std::move(results[j]);
     }
+
   }
 
   auto final_it = role_map.find("final_output");

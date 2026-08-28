@@ -21,6 +21,7 @@ import com.pockettavern.app.ui.navigation.SillyTavernNavGraph
 import com.pockettavern.app.ui.theme.SillyTavernTheme
 import com.pockettavern.app.ui.theme.ThemeManager
 import com.pockettavern.app.util.LocaleHelper
+import com.pockettavern.app.util.NpuDiagnostic
 import com.pockettavern.app.util.OnDeviceImageGenerationScreenState
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -39,6 +40,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
+        // Explicit debug-only command hook used by scratch/run_npu_diffusion.py. This is not an
+        // automatic diagnostic: it runs only when adb supplies the extra below, and allows the
+        // desktop script to drive real parallel batch-1 CFG image generation with a fixed seed.
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("run_npu_unet_parallel_cfg_step", false)) {
+            Thread { NpuDiagnostic.runParallelBatch1FileStep(applicationContext) }.start()
+        }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try {

@@ -773,9 +773,9 @@ private fun SdxlModelSection(
                     com.pockettavern.app.domain.model.SdxlRunMode.CPU ->
                         "Always uses the MNN CPU backend (~30s/step)."
                     com.pockettavern.app.domain.model.SdxlRunMode.NPU ->
-                        "Requires an NPU bundle for the selected model (~19s/step); fails instead of falling back to CPU."
+                        "Requires an NPU bundle for the selected model (~30s/step with CFG); fails instead of falling back to CPU."
                     com.pockettavern.app.domain.model.SdxlRunMode.AUTO ->
-                        if (selectedHasNpu) "Selected model has an NPU bundle -- will use it (~19s/step)."
+                        if (selectedHasNpu) "Selected model has an NPU bundle -- will use it (~30s/step with CFG)."
                         else "Uses the MNN CPU backend (no NPU bundle for the selected model)."
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -783,7 +783,7 @@ private fun SdxlModelSection(
             )
             if (runMode != com.pockettavern.app.domain.model.SdxlRunMode.CPU && selectedHasNpu) {
                 Text(
-                    text = "NPU generation ignores negative prompt and CFG scale (batch-1 conditional-only).",
+                    text = "NPU generation uses your negative prompt and CFG scale via two parallel batch-1 forwards.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
