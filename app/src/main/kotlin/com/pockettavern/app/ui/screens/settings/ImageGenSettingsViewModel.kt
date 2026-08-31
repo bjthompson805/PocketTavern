@@ -3,6 +3,7 @@ package com.pockettavern.app.ui.screens.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pockettavern.app.data.local.SettingsDataStore
+import com.pockettavern.app.data.local.inference.KleinModelManager
 import com.pockettavern.app.data.local.inference.SdxlModelManager
 import com.pockettavern.app.data.repository.ImageGenRepository
 import com.pockettavern.app.domain.model.AvailableModel
@@ -38,6 +39,10 @@ data class ImageGenSettingsUiState(
     val isDownloadingSdxl: Boolean = false,
     val sdxlDownloadProgress: Float? = null,
     val sdxlDownloadStatus: String? = null,
+    // On-device FLUX.2 [klein] -- manually staged (no download flow), see KleinModelManager.
+    val kleinStatus: KleinModelManager.Status = KleinModelManager.Status(
+        qwenReady = false, npuReady = false, qwenPath = "", npuPath = ""
+    ),
 )
 
 @HiltViewModel
@@ -45,6 +50,7 @@ class ImageGenSettingsViewModel @Inject constructor(
     private val settingsDataStore: SettingsDataStore,
     private val imageGenRepository: ImageGenRepository,
     private val sdxlModelManager: SdxlModelManager,
+    private val kleinModelManager: KleinModelManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ImageGenSettingsUiState())
@@ -64,6 +70,11 @@ class ImageGenSettingsViewModel @Inject constructor(
             }
         }
         refreshSdxlModels()
+        refreshKleinStatus()
+    }
+
+    fun refreshKleinStatus() {
+        _uiState.update { it.copy(kleinStatus = kleinModelManager.status()) }
     }
 
     private fun refreshSdxlModels() {

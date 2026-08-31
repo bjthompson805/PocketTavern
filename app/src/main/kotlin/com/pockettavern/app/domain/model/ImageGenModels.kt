@@ -10,7 +10,8 @@ enum class ImageGenBackendType {
     POLLINATIONS,
     HUGGINGFACE,
     NANO_GPT,
-    LOCAL_SD_MNN;
+    LOCAL_SD_MNN,
+    LOCAL_FLUX_KLEIN;
 
     val displayName: String
         get() = when (this) {
@@ -22,6 +23,7 @@ enum class ImageGenBackendType {
             HUGGINGFACE -> "HuggingFace"
             NANO_GPT -> "nano-gpt"
             LOCAL_SD_MNN -> "On-Device (SDXL)"
+            LOCAL_FLUX_KLEIN -> "On-Device (FLUX.2 klein)"
         }
 }
 
@@ -130,5 +132,10 @@ data class ImageGenConfig(
             ImageGenBackendType.HUGGINGFACE -> huggingfaceApiKey.isNotBlank()
             ImageGenBackendType.NANO_GPT -> nanoGptApiKey.isNotBlank()
             ImageGenBackendType.LOCAL_SD_MNN -> localSdxlModelPath.isNotBlank()
+            // No config field to check -- model files are staged at fixed, non-configurable
+            // paths (see KleinModelManager), not entered by the user. testConnection()/generate()
+            // surface a real "not staged" error at generation time instead, same as any other
+            // backend with no required field (e.g. POLLINATIONS).
+            ImageGenBackendType.LOCAL_FLUX_KLEIN -> true
         }
 }

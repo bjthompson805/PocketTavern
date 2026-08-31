@@ -116,7 +116,9 @@ object NetworkModule {
         apiProvider: @JvmSuppressWildcards () -> ForgeApi,
         @Named("Forge") forgeClient: OkHttpClient,
         settingsDataStore: SettingsDataStore,
-        mnnDiffusionEngine: com.pockettavern.app.data.local.inference.MnnDiffusionEngine
+        mnnDiffusionEngine: com.pockettavern.app.data.local.inference.MnnDiffusionEngine,
+        kleinDiffusionEngine: com.pockettavern.app.data.local.inference.KleinDiffusionEngine,
+        kleinModelManager: com.pockettavern.app.data.local.inference.KleinModelManager
     ): Map<ImageGenBackendType, @JvmSuppressWildcards ImageGenBackend> {
         return mapOf(
             ImageGenBackendType.SD_WEBUI to SdWebuiBackend(apiProvider),
@@ -126,7 +128,10 @@ object NetworkModule {
             ImageGenBackendType.POLLINATIONS to PollinationsBackend(forgeClient, settingsDataStore),
             ImageGenBackendType.HUGGINGFACE to HuggingFaceBackend(forgeClient, settingsDataStore),
             ImageGenBackendType.NANO_GPT to NanoGptBackend(forgeClient, settingsDataStore),
-            ImageGenBackendType.LOCAL_SD_MNN to MnnDiffusionBackend(mnnDiffusionEngine, settingsDataStore)
+            ImageGenBackendType.LOCAL_SD_MNN to MnnDiffusionBackend(mnnDiffusionEngine, settingsDataStore),
+            ImageGenBackendType.LOCAL_FLUX_KLEIN to com.pockettavern.app.data.remote.imagegen.KleinDiffusionBackend(
+                kleinDiffusionEngine, kleinModelManager
+            )
         )
     }
 

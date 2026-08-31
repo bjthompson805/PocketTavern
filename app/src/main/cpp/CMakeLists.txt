@@ -86,13 +86,32 @@ add_library(pockettavern_diffusion SHARED
     # the diagnostic linkable until that JNI entry point is removed after end-to-end validation.
     npu/NpuUnetEngine.cpp
     npu/NpuTextEncoderEngine.cpp
+    # THROWAWAY: confirms real C++ perf/memory behavior for the FLUX.2 [klein] chunked/
+    # flash-attention design (docs/flux2-klein-conversion.md step 7/8) before scaling to more
+    # blocks or wiring into a production engine -- see KleinSingleBlockEngine.hpp.
+    npu/KleinSingleBlockEngine.cpp
+    npu/KleinDoubleBlockEngine.cpp
+    npu/KleinTransformerEngine.cpp
+    npu/KleinComponentEngine.cpp
+    # FLUX.2 [klein] Phase 1 (docs/FLUX2_KLEIN_PHASE1_TEXT_ENCODER_PLAN.md): on-device Qwen3-4B
+    # text encoder via MNN's own LLM engine (MNN::Transformer::Llm is MNN_PUBLIC, exported from
+    # libMNN.so -- unlike NpuTextEncoderEngine/Klein*Engine above, this doesn't need its own
+    # copy compiled into MNN's target).
+    npu/QwenTextEncoderEngine.cpp
+    # Production end-to-end pipeline (prompt -> Qwen encode -> 4-step NPU denoise -> NPU VAE
+    # decode -> PNG), orchestrating the pieces above -- see docs/flux2-klein-conversion.md.
+    npu/KleinDiffusionEngine.cpp
 )
 
 target_include_directories(pockettavern_diffusion PRIVATE
     .
     MNN/include
     MNN/transformers/diffusion/engine/include
+    MNN/transformers/llm/engine/include
     litert_headers
+    # stb_image_write.h for KleinDiffusionEngine's PNG output -- header-only, no other target in
+    # this build defines STB_IMAGE_WRITE_IMPLEMENTATION, so no duplicate-symbol risk.
+    MNN/3rd_party/imageHelper
 )
 
 # static_cast (not dynamic_cast) is used deliberately in jni_diffusion.cpp instead of RTTI --

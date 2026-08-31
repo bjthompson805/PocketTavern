@@ -22,6 +22,23 @@ object DeviceCapabilities {
 
     fun totalRamGb(context: Context): Double = totalRamBytes(context) / (1024.0 * 1024 * 1024)
 
+    /**
+     * Currently-free memory, not the device's fixed total capacity -- what [canFit] must check
+     * against. A real phone has other apps/services resident (confirmed on-device: a Klein
+     * generation OOM-killed the app mid-load on a 16GB-total device because canFit() was
+     * comparing against totalRamBytes() while background apps had already claimed several GB of
+     * it -- ActivityManager.MemoryInfo.availMem was sitting right there, unused, in the same call
+     * that already reads .totalMem).
+     */
+    fun availableRamBytes(context: Context): Long = try {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        mi.availMem
+    } catch (e: Exception) {
+        0L  // unknown -- fail canFit() closed rather than optimistically allow a load
+    }
+
     fun cores(): Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
 
     /**
@@ -42,9 +59,13 @@ object DeviceCapabilities {
      */
     fun recommendedThreads(): Int = (cores() / 2).coerceIn(2, 6)
 
-    /** Rough guidance: can this device comfortably hold a model of [modelBytes]? (model + KV + headroom) */
+    /**
+     * Rough guidance: can this device comfortably hold a model of [modelBytes] *right now*?
+     * (model + KV + headroom, checked against currently-free memory -- see [availableRamBytes]'s
+     * doc for why this must not be totalRamBytes().)
+     */
     fun canFit(context: Context, modelBytes: Long): Boolean =
-        modelBytes + 1_500L * 1024 * 1024 < totalRamBytes(context)  // ~1.5GB headroom for KV + app + OS
+        modelBytes + 1_500L * 1024 * 1024 < availableRamBytes(context)  // ~1.5GB headroom for KV + app + OS
 
     /** SoC identifier, uppercased (e.g. "SM8550", "MT6989"). Empty if unknown. */
     fun soc(): String = try {

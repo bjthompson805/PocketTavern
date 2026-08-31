@@ -9,7 +9,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.material3.MenuAnchorType
@@ -158,6 +160,12 @@ fun ImageGenSettingsScreen(
                                     onDownload = viewModel::downloadSdxlModel,
                                     onDelete = viewModel::deleteSdxlModel,
                                     onRunModeChange = viewModel::updateSdxlRunMode,
+                                )
+                            }
+                            ImageGenBackendType.LOCAL_FLUX_KLEIN -> {
+                                KleinModelSection(
+                                    status = uiState.kleinStatus,
+                                    onRefresh = viewModel::refreshKleinStatus,
                                 )
                             }
                             ImageGenBackendType.DALLE -> {
@@ -822,6 +830,55 @@ private fun SdxlModelSection(
 
         downloadStatus?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun KleinModelSection(
+    status: com.pockettavern.app.data.local.inference.KleinModelManager.Status,
+    onRefresh: () -> Unit,
+) {
+    @Composable
+    fun StatusRow(label: String, ready: Boolean, path: String) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = if (ready) Icons.Default.CheckCircle else Icons.Default.Warning,
+                contentDescription = null,
+                tint = if (ready) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(label, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = "${if (ready) "Staged" else "Not staged"} -- $path",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            text = "FLUX.2 [klein]'s model files (~20GB) are custom NPU-converted artifacts with " +
+                "no public host -- stage them manually with adb push into the paths below " +
+                "(see scripts/stage_klein_npu_artifacts.sh for the NPU bundle).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        StatusRow("Text encoder (Qwen3-4B, fp16)", status.qwenReady, status.qwenPath)
+        StatusRow("NPU transformer + VAE bundle", status.npuReady, status.npuPath)
+        OutlinedButton(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+            Text("Refresh")
+        }
+        if (!status.qwenReady || !status.npuReady) {
+            Text(
+                text = "Both must be staged before generation will work.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
         }
     }
 }

@@ -9,7 +9,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Coordinates RAM between the on-device engines (LiteRT-LM, GGUF/llama.cpp, MNN SDXL). Each one
+ * Coordinates RAM between the on-device engines (LiteRT-LM, GGUF/llama.cpp, MNN SDXL, FLUX.2
+ * [klein]). Each one
  * keeps its model fully resident once loaded and never evicts itself — there was previously no
  * eviction at all, so a device that loaded both an LLM and SDXL in the same session kept both
  * resident for the rest of the process's life. Only one is meant to be resident at a time.
@@ -23,7 +24,7 @@ import javax.inject.Singleton
 class OnDeviceMemoryManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    enum class Slot { LITERTLM, GGUF, SDXL }
+    enum class Slot { LITERTLM, GGUF, SDXL, KLEIN }
 
     private val unloaders = mutableMapOf<Slot, suspend () -> Unit>()
     private val mutex = Mutex()
@@ -49,9 +50,11 @@ class OnDeviceMemoryManager @Inject constructor(
         }
         if (!DeviceCapabilities.canFit(context, modelBytes)) {
             val neededGb = "%.1f".format(modelBytes / (1024.0 * 1024 * 1024))
-            val totalGb = "%.1f".format(DeviceCapabilities.totalRamGb(context))
+            val availableGb = "%.1f".format(
+                DeviceCapabilities.availableRamBytes(context) / (1024.0 * 1024 * 1024)
+            )
             throw IllegalStateException(
-                "Not enough RAM to load this model (~${neededGb}GB needed, ${totalGb}GB total on this device)."
+                "Not enough RAM to load this model (~${neededGb}GB needed, ${availableGb}GB free on this device)."
             )
         }
     }
